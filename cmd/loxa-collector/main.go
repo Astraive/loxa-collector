@@ -1,17 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -24,8 +20,11 @@ import (
 	"time"
 
 	collectorconfig "github.com/astraive/loxa-collector/internal/config"
+	"github.com/astraive/loxa-collector/internal/ingest"
+	collectormetrics "github.com/astraive/loxa-collector/internal/metrics"
 	processing "github.com/astraive/loxa-collector/internal/processing"
 	storagepath "github.com/astraive/loxa-collector/internal/storage"
+	"github.com/astraive/loxa-collector/internal/validation"
 	"github.com/astraive/loxa-go"
 	"github.com/astraive/loxa-go/sinks/duckdb"
 	kafkasink "github.com/astraive/loxa-go/sinks/kafka"
@@ -34,10 +33,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 )
-
-type ingestRequest struct {
-	Events []json.RawMessage `json:"events"`
-}
 
 type collectorConfig struct {
 	readHeaderTimeout       time.Duration
@@ -151,12 +146,6 @@ type collectorState struct {
 	dedupeSeenAt   map[string]time.Time
 	processorMu    sync.Mutex
 	processor      *processing.Processor
-}
-
-type ingestResponse struct {
-	Accepted int `json:"accepted"`
-	Invalid  int `json:"invalid"`
-	Rejected int `json:"rejected"`
 }
 
 var version = "dev"
@@ -413,18 +402,18 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.rateLimitEnabled && !s.rateLimiter.Allow() {
 		s.metrics.requestsLimited.Add(1)
 		s.metrics.eventsRejected.Add(1)
-		writeJSON(w, http.StatusTooManyRequests, ingestResponse{Rejected: 1})
+		writeJSON(w, http.StatusTooManyRequests, ingest.Response{Rejected: 1})
 		return
 	}
 
 	if s.cfg.authEnabled && s.cfg.apiKey != "" && strings.TrimSpace(r.Header.Get(s.cfg.apiKeyHeader)) != s.cfg.apiKey {
 		s.metrics.requestsAuthErr.Add(1)
 		s.metrics.eventsRejected.Add(1)
-		writeJSON(w, http.StatusUnauthorized, ingestResponse{Rejected: 1})
+		writeJSON(w, http.StatusUnauthorized, ingest.Response{Rejected: 1})
 		return
 	}
 
-	rawEvents, err := parseEvents(r, s.cfg.maxBodyBytes)
+	rawEvents, err := ingest.ParseEvents(r, s.cfg.maxBodyBytes)
 	if err != nil {
 		s.metrics.eventsRejected.Add(1)
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -451,7 +440,7 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp ingestResponse
+	var resp ingest.Response
 	for _, raw := range rawEvents {
 		if s.cfg.reliabilityMode == "queue" {
 			if err := s.ingestSink.WriteEvent(r.Context(), raw, nil); err != nil {
@@ -471,14 +460,14 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if !isJSONObject(raw) {
+		if !validation.IsJSONObject(raw) {
 			resp.Invalid++
 			s.metrics.eventsInvalid.Add(1)
 			continue
 		}
 
 		if s.cfg.dedupeEnabled {
-			eventID, ok := extractStringPath(raw, s.cfg.dedupeKey)
+			eventID, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
 			if ok && s.isDuplicate(eventID) {
 				resp.Accepted++
 				s.metrics.eventsAccepted.Add(1)
@@ -537,86 +526,6 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
-func parseEvents(r *http.Request, maxBodyBytes int64) ([][]byte, error) {
-	defer r.Body.Close()
-
-	reader := io.Reader(r.Body)
-	if strings.Contains(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))), "gzip") {
-		gz, err := gzip.NewReader(r.Body)
-		if err != nil {
-			return nil, err
-		}
-		defer gz.Close()
-		reader = gz
-	}
-
-	payload, err := io.ReadAll(io.LimitReader(reader, maxBodyBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(payload)) > maxBodyBytes {
-		return nil, fmt.Errorf("payload exceeds max body bytes")
-	}
-	payload = bytes.TrimSpace(payload)
-	if len(payload) == 0 {
-		return nil, nil
-	}
-
-	switch payload[0] {
-	case '[':
-		var arr []json.RawMessage
-		if err := json.Unmarshal(payload, &arr); err != nil {
-			return nil, err
-		}
-		out := make([][]byte, 0, len(arr))
-		for _, it := range arr {
-			out = append(out, bytes.TrimSpace([]byte(it)))
-		}
-		return out, nil
-	case '{':
-		if bytes.Contains(payload, []byte{'\n'}) {
-			nd := parseNDJSON(payload)
-			if len(nd) > 1 {
-				return nd, nil
-			}
-		}
-		var req ingestRequest
-		if err := json.Unmarshal(payload, &req); err == nil && len(req.Events) > 0 {
-			out := make([][]byte, 0, len(req.Events))
-			for _, it := range req.Events {
-				out = append(out, bytes.TrimSpace([]byte(it)))
-			}
-			return out, nil
-		}
-		return [][]byte{payload}, nil
-	default:
-		return parseNDJSON(payload), nil
-	}
-}
-
-func parseNDJSON(payload []byte) [][]byte {
-	sc := bufio.NewScanner(bytes.NewReader(payload))
-	buf := make([]byte, 0, 1024*1024)
-	sc.Buffer(buf, math.MaxInt32)
-
-	out := make([][]byte, 0, 64)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		cp := make([]byte, len(line))
-		copy(cp, line)
-		out = append(out, cp)
-	}
-	return out
-}
-
-func isJSONObject(raw []byte) bool {
-	raw = bytes.TrimSpace(raw)
-	return len(raw) > 1 && raw[0] == '{' && json.Valid(raw)
-}
-
 func isDiskFullErr(err error) bool {
 	if err == nil {
 		return false
@@ -646,55 +555,55 @@ func (s *collectorState) metricsHandler() http.Handler {
 		reg := prometheus.NewRegistry()
 		reg.MustRegister(
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_requests_total",
+				Name: collectormetrics.RequestsTotalName,
 				Help: "Total ingest requests received.",
 			}, func() float64 { return float64(s.metrics.requestsTotal.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_requests_auth_errors_total",
+				Name: collectormetrics.RequestsAuthErrorsName,
 				Help: "Total ingest requests rejected by auth.",
 			}, func() float64 { return float64(s.metrics.requestsAuthErr.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_requests_limited_total",
+				Name: collectormetrics.RequestsLimitedName,
 				Help: "Total ingest requests rejected by rate limiting.",
 			}, func() float64 { return float64(s.metrics.requestsLimited.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_events_accepted_total",
+				Name: collectormetrics.EventsAcceptedName,
 				Help: "Total events accepted by collector.",
 			}, func() float64 { return float64(s.metrics.eventsAccepted.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_events_invalid_total",
+				Name: collectormetrics.EventsInvalidName,
 				Help: "Total events rejected as invalid JSON objects.",
 			}, func() float64 { return float64(s.metrics.eventsInvalid.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_events_rejected_total",
+				Name: collectormetrics.EventsRejectedName,
 				Help: "Total events rejected before sink persistence.",
 			}, func() float64 { return float64(s.metrics.eventsRejected.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_events_deduped_total",
+				Name: collectormetrics.EventsDedupedName,
 				Help: "Total duplicate events short-circuited by dedupe.",
 			}, func() float64 { return float64(s.metrics.eventsDeduped.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
-				Name: "loxa_collector_sink_write_errors_total",
+				Name: collectormetrics.SinkWriteErrorsName,
 				Help: "Total sink write failures.",
 			}, func() float64 { return float64(s.metrics.sinkWriteErrors.Load()) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-				Name: "loxa_collector_spool_bytes",
+				Name: collectormetrics.SpoolBytesName,
 				Help: "Current spool file size in bytes.",
 			}, func() float64 { return float64(s.metrics.spoolBytes.Load()) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-				Name: "loxa_collector_sink_health",
+				Name: collectormetrics.SinkHealthName,
 				Help: "Collector sink health state (1=healthy,0=unhealthy).",
 			}, func() float64 { return float64(boolMetric(s.effectiveSinkHealthy())) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-				Name: "loxa_collector_disk_health",
+				Name: collectormetrics.DiskHealthName,
 				Help: "Collector disk health state (1=healthy,0=unhealthy).",
 			}, func() float64 { return float64(boolMetric(s.effectiveDiskHealthy())) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-				Name: "loxa_collector_spool_health",
+				Name: collectormetrics.SpoolHealthName,
 				Help: "Collector spool health state (1=healthy,0=unhealthy).",
 			}, func() float64 { return float64(boolMetric(s.effectiveSpoolHealthy())) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-				Name: "loxa_collector_ready",
+				Name: collectormetrics.ReadyName,
 				Help: "Collector readiness state (1=ready,0=not ready).",
 			}, func() float64 { return float64(boolMetric(s.isReady())) }),
 		)
@@ -967,26 +876,6 @@ func (s *collectorState) isDuplicate(value string) bool {
 	}
 	s.dedupeSeenAt[value] = now
 	return false
-}
-
-func extractStringPath(raw []byte, path string) (string, bool) {
-	var data any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return "", false
-	}
-	cur := data
-	for _, p := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return "", false
-		}
-		cur, ok = m[p]
-		if !ok {
-			return "", false
-		}
-	}
-	v, ok := cur.(string)
-	return v, ok
 }
 
 func runPeriodicCheckpoint(db *sql.DB, interval time.Duration, stop <-chan struct{}, wg *sync.WaitGroup) {

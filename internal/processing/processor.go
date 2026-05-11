@@ -2,7 +2,6 @@ package processing
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/astraive/loxa-collector/internal/validation"
 	"github.com/astraive/loxa-go"
 )
 
@@ -189,13 +189,13 @@ func (p *Processor) Close() error {
 }
 
 func (p *Processor) Process(ctx context.Context, raw []byte) Result {
-	if p.cfg.ValidateJSONObjects && !isJSONObject(raw) {
+	if p.cfg.ValidateJSONObjects && !validation.IsJSONObject(raw) {
 		p.writeDLQ(raw, ErrInvalidEvent)
 		return Result{Invalid: true, Err: ErrInvalidEvent}
 	}
 
 	if p.cfg.DedupeEnabled {
-		eventID, ok := extractStringPath(raw, p.cfg.DedupeKey)
+		eventID, ok := validation.ExtractStringPath(raw, p.cfg.DedupeKey)
 		if ok && p.isDuplicate(eventID) {
 			return Result{Accepted: true, Deduped: true}
 		}
@@ -493,31 +493,6 @@ func (p *Processor) isDuplicate(value string) bool {
 	}
 	p.dedupeSeenAt[value] = now
 	return false
-}
-
-func extractStringPath(raw []byte, path string) (string, bool) {
-	var data any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return "", false
-	}
-	cur := data
-	for _, p := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return "", false
-		}
-		cur, ok = m[p]
-		if !ok {
-			return "", false
-		}
-	}
-	v, ok := cur.(string)
-	return v, ok
-}
-
-func isJSONObject(raw []byte) bool {
-	raw = []byte(strings.TrimSpace(string(raw)))
-	return len(raw) > 1 && raw[0] == '{' && json.Valid(raw)
 }
 
 func isDiskFullErr(err error) bool {
