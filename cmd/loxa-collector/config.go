@@ -26,34 +26,53 @@ type fileConfig = collectorconfig.Config
 func defaultFileConfig() fileConfig { return collectorconfig.Default() }
 
 func loadCollectorConfigFromArgs(args []string) (collectorConfig, error) {
-	cfgFile := ""
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.StringVar(&cfgFile, "c", "", "path to config file")
-	addr := fs.String("addr", "", "collector listen address")
-	duckdbPath := fs.String("duckdb-path", "", "duckdb file path")
-	apiKey := fs.String("api-key", "", "collector API key")
-	maxBodyBytes := fs.Int64("max-body-bytes", 0, "max request body bytes")
-	maxEvents := fs.Int("max-events", 0, "max events per request")
-	batchSize := fs.Int("batch-size", 0, "duckdb batch size")
-	flushInterval := fs.Duration("flush-interval", 0, "duckdb flush interval")
+	cfgFile := fs.String("c", "loxa.yaml", "path to config file")
+	addr := fs.String("addr", "", "collector listen address (overrides config)")
+	apiKey := fs.String("api-key", "", "collector API key (overrides config)")
+	duckDBPath := fs.String("duckdb-path", "", "duckdb path (overrides config)")
+	duckDBBatchSize := fs.Int("batch-size", 0, "duckdb batch size (overrides config)")
+	duckDBFlushInterval := fs.Duration("flush-interval", 0, "duckdb flush interval (overrides config)")
+	maxBodyBytes := fs.Int64("max-body-bytes", 0, "max body bytes (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return collectorConfig{}, err
 	}
-	explicitFlags := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) {
-		explicitFlags[f.Name] = true
-	})
 
 	fc := defaultFileConfig()
-	if cfgFile != "" {
-		if err := mergeConfigFile(&fc, cfgFile); err != nil {
-			return collectorConfig{}, err
+
+	if *cfgFile != "" {
+		if _, err := os.Stat(*cfgFile); err == nil {
+			if err := collectorconfig.LoadFile(&fc, *cfgFile); err != nil {
+				return collectorConfig{}, err
+			}
 		}
 	}
 	if err := applyEnvOverrides(&fc); err != nil {
 		return collectorConfig{}, err
 	}
-	applyFlagOverrides(&fc, explicitFlags, *addr, *duckdbPath, *apiKey, *maxBodyBytes, *maxEvents, *batchSize, *flushInterval)
+
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	if set["addr"] && *addr != "" {
+		fc.Collector.Addr = *addr
+	}
+	if set["api-key"] {
+		fc.Auth.Value = *apiKey
+		fc.Auth.Enabled = true
+	}
+	if set["duckdb-path"] {
+		fc.DuckDB.Path = *duckDBPath
+	}
+	if set["batch-size"] {
+		fc.DuckDB.BatchSize = *duckDBBatchSize
+	}
+	if set["flush-interval"] {
+		fc.DuckDB.FlushInterval = *duckDBFlushInterval
+	}
+	if set["max-body-bytes"] {
+		fc.Collector.MaxBodyBytes = *maxBodyBytes
+	}
 
 	if err := validateFileConfig(fc); err != nil {
 		return collectorConfig{}, err
@@ -88,15 +107,15 @@ func configCommand(args []string) error {
 }
 
 func loadPrintableConfig(args []string) (fileConfig, error) {
-	cfgFile := ""
+	cfgFile := "loxa.yaml"
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	fs.StringVar(&cfgFile, "c", "", "path to config file")
+	fs.StringVar(&cfgFile, "c", cfgFile, "path to config file")
 	if err := fs.Parse(args); err != nil {
 		return fileConfig{}, err
 	}
 	fc := defaultFileConfig()
-	if cfgFile != "" {
-		if err := mergeConfigFile(&fc, cfgFile); err != nil {
+	if _, err := os.Stat(cfgFile); err == nil {
+		if err := collectorconfig.LoadFile(&fc, cfgFile); err != nil {
 			return fileConfig{}, err
 		}
 	}
@@ -107,26 +126,6 @@ func loadPrintableConfig(args []string) (fileConfig, error) {
 		return fileConfig{}, err
 	}
 	return fc, nil
-}
-
-func mergeConfigFile(dst *fileConfig, path string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
-	dec.KnownFields(true)
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	var extraDoc fileConfig
-	if err := dec.Decode(&extraDoc); err != io.EOF {
-		if err == nil {
-			return errors.New("config file must contain a single YAML document")
-		}
-		return err
-	}
-	return nil
 }
 
 func applyEnvOverrides(fc *fileConfig) error {
@@ -361,31 +360,6 @@ func applyEnvOverrides(fc *fileConfig) error {
 		}
 	}
 	return nil
-}
-
-func applyFlagOverrides(fc *fileConfig, explicit map[string]bool, addr, duckdbPath, apiKey string, maxBodyBytes int64, maxEvents, batchSize int, flushInterval time.Duration) {
-	if explicit["addr"] {
-		fc.Collector.Addr = addr
-	}
-	if explicit["duckdb-path"] {
-		fc.DuckDB.Path = duckdbPath
-	}
-	if explicit["api-key"] {
-		fc.Auth.Value = apiKey
-		fc.Auth.Enabled = true
-	}
-	if explicit["max-body-bytes"] {
-		fc.Collector.MaxBodyBytes = maxBodyBytes
-	}
-	if explicit["max-events"] {
-		fc.Collector.MaxEventsPerReq = maxEvents
-	}
-	if explicit["batch-size"] {
-		fc.DuckDB.BatchSize = batchSize
-	}
-	if explicit["flush-interval"] {
-		fc.DuckDB.FlushInterval = flushInterval
-	}
 }
 
 func validateFileConfig(fc fileConfig) error {
@@ -787,4 +761,25 @@ func marshalPrintableConfig(fc fileConfig) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// Deprecated: mergeConfigFile is preserved for backward compatibility
+func mergeConfigFile(dst *fileConfig, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extraDoc fileConfig
+	if err := dec.Decode(&extraDoc); err != io.EOF {
+		if err == nil {
+			return errors.New("config file must contain a single YAML document")
+		}
+		return err
+	}
+	return nil
 }

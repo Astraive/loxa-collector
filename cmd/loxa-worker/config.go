@@ -64,16 +64,16 @@ type workerConfig struct {
 }
 
 func loadWorkerConfigFromArgs(args []string) (workerConfig, error) {
-	cfgFile := ""
+	cfgFile := "loxa.yaml"
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.StringVar(&cfgFile, "c", "", "path to config file")
+	fs.StringVar(&cfgFile, "c", cfgFile, "path to config file")
 	if err := fs.Parse(args); err != nil {
 		return workerConfig{}, err
 	}
 
 	fc := collectorconfig.Default()
-	if cfgFile != "" {
-		if err := mergeWorkerConfigFile(&fc, cfgFile); err != nil {
+	if _, err := os.Stat(cfgFile); err == nil {
+		if err := collectorconfig.LoadFile(&fc, cfgFile); err != nil {
 			return workerConfig{}, err
 		}
 	}

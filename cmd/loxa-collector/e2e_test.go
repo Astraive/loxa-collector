@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/astraive/loxa-go/sinks/duckdb"
+	"github.com/astraive/loxa-collector/internal/ingest"
 	_ "github.com/marcboeker/go-duckdb"
 	"golang.org/x/time/rate"
 )
@@ -73,13 +74,15 @@ func TestCollectorE2ERawPreservation(t *testing.T) {
 		t.Fatalf("expected 207, got %d", res.StatusCode)
 	}
 
-	var out ingestResponse
+	var out ingest.Response
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if out.Accepted != 1 || out.Invalid != 1 || out.Rejected != 0 {
 		t.Fatalf("unexpected response: %+v", out)
 	}
+
+	_ = out
 
 	if err := sink.Flush(context.Background()); err != nil {
 		t.Fatalf("sink flush: %v", err)

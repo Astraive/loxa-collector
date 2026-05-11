@@ -115,6 +115,7 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
+// Local development replaces — remove when loxa-go is published
 replace github.com/astraive/loxa-go => ../loxa-go
 
 replace github.com/astraive/loxa-go/sinks => ../loxa-go/sinks

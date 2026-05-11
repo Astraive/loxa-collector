@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -385,4 +387,16 @@ func Default() Config {
 
 func Load(data []byte, cfg *Config) error {
 	return yaml.Unmarshal(data, cfg)
+}
+
+// LoadFile reads and parses a YAML config file into cfg.
+func LoadFile(cfg *Config, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config file %s: %w", path, err)
+	}
+	if err := yaml.Unmarshal(raw, cfg); err != nil {
+		return fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	return nil
 }

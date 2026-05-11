@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/astraive/loxa-collector/internal/ingest"
 	storagepath "github.com/astraive/loxa-collector/internal/storage"
 	"github.com/astraive/loxa-go"
 	"golang.org/x/time/rate"
@@ -53,7 +54,7 @@ func testCollectorConfig() collectorConfig {
 
 func TestParseEventsJSONArray(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader(`[{"event":"a"},{"event":"b"}]`))
-	events, err := parseEvents(req, 1024)
+	events, err := ingest.ParseEvents(req, 1024)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestParseEventsJSONArray(t *testing.T) {
 
 func TestParseEventsWrappedEvents(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader(`{"events":[{"event":"a"},{"event":"b"}]}`))
-	events, err := parseEvents(req, 1024)
+	events, err := ingest.ParseEvents(req, 1024)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestParseEventsWrappedEvents(t *testing.T) {
 
 func TestParseEventsNDJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader("{\"event\":\"a\"}\n{\"event\":\"b\"}\n"))
-	events, err := parseEvents(req, 1024)
+	events, err := ingest.ParseEvents(req, 1024)
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestHandleIngestPartialSuccess(t *testing.T) {
 	if rec.Code != http.StatusMultiStatus {
 		t.Fatalf("expected 207, got %d", rec.Code)
 	}
-	var out ingestResponse
+	var out ingest.Response
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
