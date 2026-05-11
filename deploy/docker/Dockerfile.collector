@@ -1,0 +1,33 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /build
+
+COPY go.work go.mod go.sum ./
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY collector/ collector/
+COPY sinks/ sinks/
+COPY libs/ libs/
+COPY storagepath/ storagepath/
+COPY utils/ utils/
+COPY integrations/ integrations/
+COPY middleware/ middleware/
+COPY testkit/ testkit/
+
+RUN CGO_ENABLED=0 GOOS=linux go build -o loxa-collector ./cmd/loxa-collector
+
+FROM alpine:3.19
+
+RUN apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /build/loxa-collector /usr/local/bin/
+COPY deploy/docker/docker-entrypoint.sh /usr/local/bin/
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+EXPOSE 8080 8081 9090
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["loxa-collector"]

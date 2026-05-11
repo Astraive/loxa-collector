@@ -1,0 +1,10 @@
+collector:
+  addr: ":9090"
+kafka:
+  brokers:
+    - "127.0.0.1:9092"
+  topic: "loxa-events"
+worker:
+  consumer_group: "loxa-worker"
+reliability:
+  mode: "queue"
