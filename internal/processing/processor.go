@@ -40,9 +40,11 @@ type Config struct {
 	DedupeWindow            time.Duration
 	ValidateJSONObjects     bool
 	OnDiskFull              func()
-	OnDLQWrite              func(n int64) // Called when DLQ write succeeds
-	OnDLQWriteFail          func(n int64) // Called when DLQ write fails after retries
+	OnDLQWrite              func(n int64)
+	OnDLQWriteFail          func(n int64)
+	OnSchemaWarn            func(err error)
 	Schema                  SchemaConfig
+	LogFunc                 func(level string, message string, fields map[string]any)
 }
 
 type SchemaConfig struct {
@@ -209,8 +211,11 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 		mode := strings.ToLower(p.cfg.Schema.Mode)
 		switch mode {
 		case "warn":
-			// Log warning but proceed
-			fmt.Fprintf(os.Stderr, "[loxa] schema validation warning: %v\n", err)
+			if p.cfg.OnSchemaWarn != nil {
+				p.cfg.OnSchemaWarn(err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[WARN] schema validation warning: %v\n", err)
+			}
 		case "reject":
 			return Result{Invalid: true, Err: err}
 		case "quarantine":
@@ -218,7 +223,9 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 			return Result{Accepted: true, Invalid: true, Err: err} // Accepted by collector but quarantined
 		}
 	}
-	raw = validated
+	if validated != nil {
+		raw = validated
+	}
 
 	outcome, err := p.deliverWithRetry(ctx, raw)
 	if p.shouldWriteDLQ(outcome) {

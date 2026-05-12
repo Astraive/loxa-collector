@@ -142,12 +142,13 @@ type collectorState struct {
 	spoolProcessedPos int64
 	spoolMu           sync.Mutex
 	deliveryQueue     chan []byte
-	deliveryStop      chan struct{}
 	deliveryWG        sync.WaitGroup
 	metricsInit       sync.Once
 	metricsHTTP       http.Handler
 	dedupeMu          sync.Mutex
 	dedupeSeenAt      map[string]time.Time
+	tailMu            sync.Mutex
+	tailSubscribers   map[chan []byte]struct{}
 	processorMu       sync.Mutex
 	processor         *processing.Processor
 	reliabilityCtx    context.Context

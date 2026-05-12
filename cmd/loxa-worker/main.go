@@ -241,8 +241,16 @@ func runWorker(cfg workerConfig) error {
 		return err
 	}
 
+	// Graceful shutdown: flush pending records before closing sinks
+	logJSON("info", "worker_shutdown_begin", nil)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
 	defer shutdownCancel()
+
+	// Commit any remaining offsets before closing
+	if err := reader.Close(); err != nil {
+		logJSON("error", "worker_kafka_close_failed", map[string]any{"error": err.Error()})
+	}
+
 	for _, sink := range sinksForShutdown(primarySink, secondarySinks, fallbackSink) {
 		if err := sink.Sink.Flush(shutdownCtx); err != nil {
 			logJSON("error", "worker_sink_flush_failed", map[string]any{"sink": sink.Name, "error": err.Error()})

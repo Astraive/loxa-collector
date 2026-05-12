@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -19,11 +21,14 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cfg.authEnabled && s.cfg.apiKey != "" && strings.TrimSpace(r.Header.Get(s.cfg.apiKeyHeader)) != s.cfg.apiKey {
-		s.metrics.requestsAuthErr.Add(1)
-		s.metrics.eventsRejected.Add(1)
-		writeJSON(w, http.StatusUnauthorized, ingest.Response{Rejected: 1})
-		return
+	if s.cfg.authEnabled && s.cfg.apiKey != "" {
+		providedKey := r.Header.Get(s.cfg.apiKeyHeader)
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.cfg.apiKey)) != 1 {
+			s.metrics.requestsAuthErr.Add(1)
+			s.metrics.eventsRejected.Add(1)
+			writeJSON(w, http.StatusUnauthorized, ingest.Response{Rejected: 1})
+			return
+		}
 	}
 
 	rawEvents, err := ingest.ParseEvents(r, s.cfg.maxBodyBytes)
@@ -55,24 +60,6 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 	var resp ingest.Response
 	for _, raw := range rawEvents {
-		if s.cfg.reliabilityMode == "queue" {
-			if err := s.ingestSink.WriteEvent(r.Context(), raw, nil); err != nil {
-				resp.Rejected++
-				s.metrics.eventsRejected.Add(1)
-				s.metrics.sinkWriteErrors.Add(1)
-				if isDiskFullErr(err) {
-					s.diskHealthy.Store(false)
-				}
-				s.sinkHealthy.Store(false)
-				logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": err.Error()})
-				continue
-			}
-			s.sinkHealthy.Store(true)
-			resp.Accepted++
-			s.metrics.eventsAccepted.Add(1)
-			continue
-		}
-
 		if !validation.IsJSONObject(raw) {
 			resp.Invalid++
 			s.metrics.eventsInvalid.Add(1)
@@ -82,8 +69,7 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.dedupeEnabled {
 			eventID, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
 			if ok && s.isDuplicate(eventID) {
-				resp.Accepted++
-				s.metrics.eventsAccepted.Add(1)
+				resp.Deduped++
 				s.metrics.eventsDeduped.Add(1)
 				continue
 			}
@@ -113,11 +99,25 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 			if failures := result.Outcome.FailureCount(); failures > 0 {
 				s.metrics.sinkWriteErrors.Add(int64(failures))
 			}
+			if result.Deduped {
+				resp.Deduped++
+				s.metrics.eventsDeduped.Add(1)
+				continue
+			}
+			if result.Invalid {
+				resp.Invalid++
+				s.metrics.eventsInvalid.Add(1)
+				continue
+			}
 			if result.Err != nil {
 				resp.Rejected++
 				s.metrics.eventsRejected.Add(1)
 				s.sinkHealthy.Store(false)
-				logJSON("error", "collector_sink_write_failed", map[string]any{"error": result.Err.Error()})
+				if s.cfg.reliabilityMode == "queue" {
+					logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": result.Err.Error()})
+				} else {
+					logJSON("error", "collector_sink_write_failed", map[string]any{"error": result.Err.Error()})
+				}
 				continue
 			}
 			s.sinkHealthy.Store(true)
@@ -125,6 +125,7 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 
 		resp.Accepted++
 		s.metrics.eventsAccepted.Add(1)
+		s.broadcastTail(raw)
 	}
 
 	status := http.StatusAccepted
@@ -164,27 +165,52 @@ func (s *collectorState) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metricsHandler().ServeHTTP(w, r)
 }
 
+func (s *collectorState) handleTail(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ch := make(chan []byte, 128)
+	s.addTailSubscriber(ch)
+	defer s.removeTailSubscriber(ch)
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	bw := bufio.NewWriter(w)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case raw, ok := <-ch:
+			if !ok {
+				return
+			}
+			if _, err := bw.Write(raw); err != nil {
+				return
+			}
+			if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+				if err := bw.WriteByte('\n'); err != nil {
+					return
+				}
+			}
+			if err := bw.Flush(); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]byte) (int, error) {
 	accepted := 0
 
 	for _, raw := range rawEvents {
 		if len(raw) == 0 {
-			continue
-		}
-
-		if s.cfg.reliabilityMode == "queue" {
-			if err := s.ingestSink.WriteEvent(ctx, raw, nil); err != nil {
-				s.metrics.sinkWriteErrors.Add(1)
-				if isDiskFullErr(err) {
-					s.diskHealthy.Store(false)
-				}
-				s.sinkHealthy.Store(false)
-				logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": err.Error()})
-				continue
-			}
-			s.sinkHealthy.Store(true)
-			accepted++
-			s.metrics.eventsAccepted.Add(1)
 			continue
 		}
 
@@ -222,9 +248,21 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 			if failures := result.Outcome.FailureCount(); failures > 0 {
 				s.metrics.sinkWriteErrors.Add(int64(failures))
 			}
+			if result.Deduped {
+				s.metrics.eventsDeduped.Add(1)
+				continue
+			}
+			if result.Invalid {
+				s.metrics.eventsInvalid.Add(1)
+				continue
+			}
 			if result.Err != nil {
 				s.sinkHealthy.Store(false)
-				logJSON("error", "collector_sink_write_failed", map[string]any{"error": result.Err.Error()})
+				if s.cfg.reliabilityMode == "queue" {
+					logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": result.Err.Error()})
+				} else {
+					logJSON("error", "collector_sink_write_failed", map[string]any{"error": result.Err.Error()})
+				}
 				continue
 			}
 			s.sinkHealthy.Store(true)
@@ -232,7 +270,42 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 
 		accepted++
 		s.metrics.eventsAccepted.Add(1)
+		s.broadcastTail(raw)
 	}
 
 	return accepted, nil
+}
+
+func (s *collectorState) addTailSubscriber(ch chan []byte) {
+	s.tailMu.Lock()
+	defer s.tailMu.Unlock()
+	if s.tailSubscribers == nil {
+		s.tailSubscribers = make(map[chan []byte]struct{})
+	}
+	s.tailSubscribers[ch] = struct{}{}
+}
+
+func (s *collectorState) removeTailSubscriber(ch chan []byte) {
+	s.tailMu.Lock()
+	defer s.tailMu.Unlock()
+	if s.tailSubscribers == nil {
+		return
+	}
+	delete(s.tailSubscribers, ch)
+	close(ch)
+}
+
+func (s *collectorState) broadcastTail(raw []byte) {
+	s.tailMu.Lock()
+	defer s.tailMu.Unlock()
+	if len(s.tailSubscribers) == 0 {
+		return
+	}
+	cp := append([]byte(nil), raw...)
+	for ch := range s.tailSubscribers {
+		select {
+		case ch <- cp:
+		default:
+		}
+	}
 }

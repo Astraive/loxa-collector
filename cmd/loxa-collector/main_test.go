@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -467,11 +469,11 @@ func TestHandleIngestQueueModeAcceptsRawNonObject(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	state.handleIngest(rec, httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader("123")))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(sink.events) != 1 {
-		t.Fatalf("expected queued event write, got %d", len(sink.events))
+	if len(sink.events) != 0 {
+		t.Fatalf("expected invalid payload to be rejected before queueing, got %d sink writes", len(sink.events))
 	}
 }
 
@@ -585,6 +587,47 @@ func TestBuildMuxSkipsMetricsWhenDisabled(t *testing.T) {
 	buildMux(state).ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 when metrics disabled, got %d", rec.Code)
+	}
+}
+
+func TestTailStreamsAcceptedEvents(t *testing.T) {
+	sink := &fakeSink{}
+	state := &collectorState{
+		cfg:         testCollectorConfig(),
+		ingestSink:  sink,
+		rateLimiter: rate.NewLimiter(rate.Limit(1000), 1000),
+	}
+	state.ready.Store(true)
+
+	srv := httptest.NewServer(buildMux(state))
+	defer srv.Close()
+
+	tailResp, err := http.Get(srv.URL + "/tail")
+	if err != nil {
+		t.Fatalf("open tail stream: %v", err)
+	}
+	defer tailResp.Body.Close()
+
+	done := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(tailResp.Body).ReadString('\n')
+		done <- strings.TrimSpace(line)
+	}()
+
+	postResp, err := http.Post(srv.URL+"/ingest", "application/json", strings.NewReader(`{"event":"tail.event"}`))
+	if err != nil {
+		t.Fatalf("post ingest: %v", err)
+	}
+	io.Copy(io.Discard, postResp.Body)
+	postResp.Body.Close()
+
+	select {
+	case line := <-done:
+		if line != `{"event":"tail.event"}` {
+			t.Fatalf("unexpected tail line: %q", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tail event")
 	}
 }
 

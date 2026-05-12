@@ -338,9 +338,13 @@ func (q *Queue) doFlush() error {
 					q.state.Retried++
 				} else {
 					delete(q.inflight, e.ID)
+					q.state.InFlight--
+					q.state.Failed++
 				}
 			}
 			q.cond.Signal()
+		} else {
+			q.state.InFlight -= int64(len(events))
 		}
 	}
 
@@ -416,8 +420,12 @@ func (q *Queue) Close() error {
 	q.closed = true
 	q.mu.Unlock()
 
+	// Final flush of any remaining buffered events
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := q.doFlush(); err != nil {
+		return err
+	}
 
 	return q.cfg.Sink.Close(ctx)
 }

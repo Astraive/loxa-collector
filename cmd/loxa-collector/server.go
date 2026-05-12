@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -35,6 +34,7 @@ func runCollector(cfg collectorConfig) error {
 		fanoutDBs      []*sql.DB
 		schedulersStop chan struct{}
 		schedWG        sync.WaitGroup
+		errCh          = make(chan error, 1)
 	)
 
 	if cfg.reliabilityMode == "queue" {
@@ -122,38 +122,42 @@ func runCollector(cfg collectorConfig) error {
 		return err
 	}
 	defer state.closeReliability()
-	if cfg.reliabilityMode != "queue" {
-		state.processor, err = processing.New(processing.Config{
-			DeliveryPolicy:          cfg.deliveryPolicy,
-			RetryEnabled:            cfg.retryEnabled,
-			RetryMaxAttempts:        cfg.retryMaxAttempts,
-			RetryInitialBackoff:     cfg.retryInitialBackoff,
-			RetryMaxBackoff:         cfg.retryMaxBackoff,
-			RetryJitter:             cfg.retryJitter,
-			FallbackEnabled:         cfg.fallbackEnabled,
-			FallbackOnPrimaryFail:   cfg.fallbackOnPrimaryFail,
-			FallbackOnSecondaryFail: cfg.fallbackOnSecondaryFail,
-			FallbackOnPolicyFail:    cfg.fallbackOnPolicyFail,
-			DLQEnabled:              cfg.dlqEnabled,
-			DLQPath:                 cfg.dlqPath,
-			DLQOnPrimaryFail:        cfg.dlqOnPrimaryFail,
-			DLQOnSecondaryFail:      cfg.dlqOnSecondaryFail,
-			DLQOnFallbackFail:       state.cfg.dlqOnFallbackFail,
-			DLQOnPolicyFail:         state.cfg.dlqOnPolicyFail,
-			OnDiskFull: func() {
-				state.diskHealthy.Store(false)
-			},
-			Schema: processing.SchemaConfig{
-				Mode:           state.cfg.schemaMode,
-				SchemaVersion:  state.cfg.schemaSchemaVersion,
-				EventVersion:   state.cfg.schemaEventVersion,
-				QuarantinePath: state.cfg.schemaQuarantinePath,
-				Registry:       state.convertSchemaRegistry(),
-			},
-		}, sink, secondarySinks, fallbackSink, state.rng)
-		if err != nil {
-			return err
-		}
+	state.processor, err = processing.New(processing.Config{
+		DeliveryPolicy:          cfg.deliveryPolicy,
+		RetryEnabled:            cfg.retryEnabled,
+		RetryMaxAttempts:        cfg.retryMaxAttempts,
+		RetryInitialBackoff:     cfg.retryInitialBackoff,
+		RetryMaxBackoff:         cfg.retryMaxBackoff,
+		RetryJitter:             cfg.retryJitter,
+		FallbackEnabled:         cfg.fallbackEnabled,
+		FallbackOnPrimaryFail:   cfg.fallbackOnPrimaryFail,
+		FallbackOnSecondaryFail: cfg.fallbackOnSecondaryFail,
+		FallbackOnPolicyFail:    cfg.fallbackOnPolicyFail,
+		DLQEnabled:              cfg.dlqEnabled,
+		DLQPath:                 cfg.dlqPath,
+		DLQOnPrimaryFail:        cfg.dlqOnPrimaryFail,
+		DLQOnSecondaryFail:      cfg.dlqOnSecondaryFail,
+		DLQOnFallbackFail:       state.cfg.dlqOnFallbackFail,
+		DLQOnPolicyFail:         state.cfg.dlqOnPolicyFail,
+		OnDiskFull: func() {
+			state.diskHealthy.Store(false)
+		},
+		OnDLQWriteFail: func(n int64) {
+			state.metrics.sinkWriteErrors.Add(n)
+		},
+		OnSchemaWarn: func(err error) {
+			logJSON("warn", "schema_validation_warning", map[string]any{"error": err.Error()})
+		},
+		Schema: processing.SchemaConfig{
+			Mode:           state.cfg.schemaMode,
+			SchemaVersion:  state.cfg.schemaSchemaVersion,
+			EventVersion:   state.cfg.schemaEventVersion,
+			QuarantinePath: state.cfg.schemaQuarantinePath,
+			Registry:       state.convertSchemaRegistry(),
+		},
+	}, sink, secondarySinks, fallbackSink, state.rng)
+	if err != nil {
+		return err
 	}
 
 	mux := buildMux(state)
@@ -162,54 +166,64 @@ func runCollector(cfg collectorConfig) error {
 		Addr:              cfg.addr,
 		Handler:           mux,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
+		ReadTimeout:       cfg.readHeaderTimeout,
+		WriteTimeout:      cfg.shutdownTimeout,
+		IdleTimeout:       cfg.shutdownTimeout,
 	}
 
 	go func() {
-		logJSON("info", "collector_start", map[string]any{
-			"addr":             cfg.addr,
-			"reliability_mode": cfg.reliabilityMode,
-			"duckdb_path":      cfg.duckDBPath,
-			"kafka_topic":      cfg.kafkaTopic,
-		})
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen: %s", err)
+			select {
+			case errCh <- fmt.Errorf("listen: %w", err):
+			default:
+			}
 		}
 	}()
 
+	var startErr error
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logJSON("info", "collector_shutdown_begin", nil)
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
-	defer cancel()
-
-	state.ready.Store(false)
-	if err := server.Shutdown(ctx); err != nil {
-		logJSON("error", "collector_http_shutdown_failed", map[string]any{"error": err.Error()})
-	}
-
-	for _, sink := range state.sinksForShutdown() {
-		if err := sink.Sink.Flush(ctx); err != nil {
-			logJSON("error", "collector_sink_flush_failed", map[string]any{"sink": sink.Name, "error": err.Error()})
+	select {
+	case startErr = <-errCh:
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			logJSON("error", "collector_http_shutdown_failed", map[string]any{"error": err.Error()})
 		}
-		if err := sink.Sink.Close(ctx); err != nil {
-			logJSON("error", "collector_sink_close_failed", map[string]any{"sink": sink.Name, "error": err.Error()})
-		}
-	}
+		return startErr
+	case <-quit:
+		logJSON("info", "collector_shutdown_begin", nil)
 
-	if db != nil && cfg.duckDBCheckpointOnStop {
-		if _, err := db.ExecContext(ctx, "CHECKPOINT"); err != nil {
-			logJSON("error", "collector_duckdb_checkpoint_failed", map[string]any{"error": err.Error()})
-		}
-	}
-	if schedulersStop != nil {
-		close(schedulersStop)
-		schedWG.Wait()
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+		defer cancel()
 
-	logJSON("info", "collector_shutdown_complete", nil)
-	return nil
+		state.ready.Store(false)
+		if err := server.Shutdown(ctx); err != nil {
+			logJSON("error", "collector_http_shutdown_failed", map[string]any{"error": err.Error()})
+		}
+
+		for _, sink := range state.sinksForShutdown() {
+			if err := sink.Sink.Flush(ctx); err != nil {
+				logJSON("error", "collector_sink_flush_failed", map[string]any{"sink": sink.Name, "error": err.Error()})
+			}
+			if err := sink.Sink.Close(ctx); err != nil {
+				logJSON("error", "collector_sink_close_failed", map[string]any{"sink": sink.Name, "error": err.Error()})
+			}
+		}
+
+		if db != nil && cfg.duckDBCheckpointOnStop {
+			if _, err := db.ExecContext(ctx, "CHECKPOINT"); err != nil {
+				logJSON("error", "collector_duckdb_checkpoint_failed", map[string]any{"error": err.Error()})
+			}
+		}
+		if schedulersStop != nil {
+			close(schedulersStop)
+			schedWG.Wait()
+		}
+
+		logJSON("info", "collector_shutdown_complete", nil)
+		return nil
+	}
 }
 
 func buildMux(state *collectorState) *http.ServeMux {
@@ -217,6 +231,7 @@ func buildMux(state *collectorState) *http.ServeMux {
 	mux.HandleFunc("POST "+state.cfg.ingestPath, state.handleIngest)
 	mux.HandleFunc("GET "+state.cfg.healthPath, state.handleHealth)
 	mux.HandleFunc("GET "+state.cfg.readyPath, state.handleReady)
+	mux.HandleFunc("GET /tail", state.handleTail)
 	if state.cfg.metricsPrometheus {
 		mux.Handle("GET "+state.cfg.metricsPath, state.metricsHandler())
 	}

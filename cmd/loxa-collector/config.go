@@ -431,18 +431,13 @@ func validateFileConfig(fc fileConfig) error {
 		}
 	}
 	if mode == "queue" {
-		if len(fc.Kafka.Brokers) == 0 && strings.TrimSpace(fc.Reliability.QueueDir) == "" {
-			return errors.New("either kafka.brokers or reliability.queue_dir must be configured in queue mode")
+		if len(fc.Kafka.Brokers) == 0 {
+			return errors.New("kafka.brokers must be configured in queue mode")
 		}
-		if len(fc.Kafka.Brokers) > 0 {
-			for i, broker := range fc.Kafka.Brokers {
-				if strings.TrimSpace(broker) == "" {
-					return fmt.Errorf("kafka.brokers[%d] must not be empty", i)
-				}
+		for i, broker := range fc.Kafka.Brokers {
+			if strings.TrimSpace(broker) == "" {
+				return fmt.Errorf("kafka.brokers[%d] must not be empty", i)
 			}
-		}
-		if strings.TrimSpace(fc.Reliability.QueueDir) != "" && fc.Reliability.QueueBatchSize <= 0 {
-			fc.Reliability.QueueBatchSize = 100
 		}
 		if strings.TrimSpace(fc.Kafka.Topic) == "" {
 			return errors.New("kafka.topic must not be empty in queue mode")

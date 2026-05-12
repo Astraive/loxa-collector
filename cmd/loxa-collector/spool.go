@@ -11,7 +11,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 func (s *collectorState) initReliability() error {
@@ -24,7 +23,7 @@ func (s *collectorState) initReliability() error {
 	}
 
 	spoolPath := filepath.Join(s.cfg.spoolDir, s.cfg.spoolFile)
-	f, err := os.OpenFile(spoolPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(spoolPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open spool file: %w", err)
 	}
@@ -52,7 +51,6 @@ func (s *collectorState) initReliability() error {
 	}
 
 	s.deliveryQueue = make(chan []byte, s.cfg.deliveryQueueSize)
-	s.deliveryStop = make(chan struct{})
 	s.deliveryWG.Add(1)
 	go s.deliveryWorker()
 
@@ -98,26 +96,46 @@ func (s *collectorState) saveSpoolPosition() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.spoolPosFile, data, 0o600)
+	tmpPath := s.spoolPosFile + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(tmpPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	_ = os.Remove(s.spoolPosFile)
+	return os.Rename(tmpPath, s.spoolPosFile)
 }
 
 func (s *collectorState) closeReliability() {
 	if s.reliabilityCancel != nil {
 		s.reliabilityCancel()
+		s.reliabilityCancel = nil
 	}
-	if s.deliveryStop != nil {
-		close(s.deliveryStop)
+	if s.deliveryQueue != nil {
+		close(s.deliveryQueue)
 		s.deliveryWG.Wait()
+		s.deliveryQueue = nil
 	}
 	if s.spoolFile != nil {
 		if err := s.spoolFile.Close(); err != nil {
 			logJSON("error", "spool_close_failed", map[string]any{"error": err.Error()})
 		}
+		s.spoolFile = nil
 	}
 	if s.processor != nil {
 		if err := s.processor.Close(); err != nil {
 			logJSON("error", "processor_close_failed", map[string]any{"error": err.Error()})
 		}
+		s.processor = nil
 	}
 }
 
@@ -126,6 +144,9 @@ func (s *collectorState) appendSpool(raw []byte) error {
 	defer s.spoolMu.Unlock()
 	if s.spoolFile == nil {
 		return errors.New("spool file is not initialized")
+	}
+	if _, err := s.spoolFile.Seek(0, io.SeekEnd); err != nil {
+		return err
 	}
 
 	n, err := s.spoolFile.Write(append(append([]byte(nil), raw...), '\n'))
@@ -155,13 +176,8 @@ func (s *collectorState) enqueueDelivery(raw []byte) {
 
 func (s *collectorState) deliveryWorker() {
 	defer s.deliveryWG.Done()
-	for {
-		select {
-		case <-s.deliveryStop:
-			return
-		case raw := <-s.deliveryQueue:
-			s.processSpoolEvent(raw)
-		}
+	for raw := range s.deliveryQueue {
+		s.processSpoolEvent(raw)
 	}
 }
 
@@ -189,10 +205,10 @@ func (s *collectorState) processSpoolEvent(raw []byte) {
 	}
 
 	s.sinkHealthy.Store(true)
-	s.truncateSpoolAfterDelivery(raw)
+	s.markSpoolDelivered(raw)
 }
 
-func (s *collectorState) truncateSpoolAfterDelivery(raw []byte) {
+func (s *collectorState) markSpoolDelivered(raw []byte) {
 	s.spoolMu.Lock()
 	defer s.spoolMu.Unlock()
 
@@ -206,47 +222,30 @@ func (s *collectorState) truncateSpoolAfterDelivery(raw []byte) {
 		return
 	}
 
-	eventLine := string(raw)
-	if s.spoolProcessedPos < currentSize && s.spoolProcessedPos > 0 {
-		_, err := s.spoolFile.Seek(s.spoolProcessedPos, io.SeekStart)
-		if err != nil {
-			logJSON("error", "spool_truncate_seek_to_pos_failed", map[string]any{"error": err.Error()})
-			return
+	s.spoolProcessedPos += int64(len(raw) + 1)
+	if s.spoolProcessedPos < currentSize {
+		s.metrics.spoolBytes.Store(currentSize - s.spoolProcessedPos)
+		if err := s.saveSpoolPosition(); err != nil {
+			logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
 		}
+		return
+	}
 
-		scanner := bufio.NewScanner(s.spoolFile)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if len(line) == 0 || !json.Valid([]byte(line)) {
-				continue
-			}
-			if line == eventLine {
-				newPos, err := s.spoolFile.Seek(0, io.SeekCurrent)
-				if err != nil {
-					logJSON("error", "spool_get_new_pos_failed", map[string]any{"error": err.Error()})
-					break
-				}
-
-				if newPos < currentSize {
-					if err := s.spoolFile.Truncate(newPos); err != nil {
-						logJSON("error", "spool_truncate_failed", map[string]any{"error": err.Error()})
-						break
-					}
-					s.spoolProcessedPos = newPos
-					s.metrics.spoolBytes.Store(currentSize - newPos)
-					if err := s.saveSpoolPosition(); err != nil {
-						logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
-					}
-					logJSON("info", "spool_truncated", map[string]any{
-						"new_size": currentSize - newPos,
-						"new_pos":  newPos,
-					})
-				}
-				break
-			}
-		}
-	} else if s.spoolProcessedPos == 0 && currentSize > 0 {
-		logJSON("warn", "spool_no_position_tracking", map[string]any{"size": currentSize})
+	if err := s.spoolFile.Truncate(0); err != nil {
+		logJSON("error", "spool_truncate_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	if _, err := s.spoolFile.Seek(0, io.SeekStart); err != nil {
+		logJSON("error", "spool_rewind_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	s.spoolProcessedPos = 0
+	s.metrics.spoolBytes.Store(0)
+	if err := s.saveSpoolPosition(); err != nil {
+		logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
+	}
+	if currentSize > 0 {
+		s.metrics.spoolBytes.Store(0)
 	}
 }
 
@@ -262,6 +261,15 @@ func (s *collectorState) replaySpool() error {
 	currentSize := fileInfo.Size()
 
 	if s.spoolProcessedPos >= currentSize {
+		if currentSize > 0 {
+			s.spoolMu.Lock()
+			if err := s.spoolFile.Truncate(0); err == nil {
+				_, _ = s.spoolFile.Seek(0, io.SeekStart)
+				s.spoolProcessedPos = 0
+				_ = s.saveSpoolPosition()
+			}
+			s.spoolMu.Unlock()
+		}
 		s.metrics.spoolBytes.Store(0)
 		logJSON("info", "spool_already_processed", map[string]any{
 			"processed_pos": s.spoolProcessedPos,
@@ -295,7 +303,6 @@ func (s *collectorState) replaySpool() error {
 	}
 
 	s.metrics.spoolReplayCount += replayCount
-	_ = s.saveSpoolPosition()
 
 	logJSON("info", "spool_replay_completed", map[string]any{
 		"replayed":    replayCount,

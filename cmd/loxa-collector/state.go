@@ -37,9 +37,6 @@ func (s *collectorState) effectiveDiskHealthy() bool {
 }
 
 func (s *collectorState) ensureProcessor() error {
-	if s.cfg.reliabilityMode == "queue" {
-		return nil
-	}
 	s.processorMu.Lock()
 	defer s.processorMu.Unlock()
 	if s.processor != nil {
