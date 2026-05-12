@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/astraive/loxa-go/sinks/duckdb"
 	"github.com/astraive/loxa-collector/internal/ingest"
+	"github.com/astraive/loxa-collector/internal/sinks/duckdb"
 	_ "github.com/marcboeker/go-duckdb"
 	"golang.org/x/time/rate"
 )

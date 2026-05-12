@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/astraive/loxa-go"
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"golang.org/x/time/rate"
 )
 
@@ -25,7 +25,7 @@ type sequenceSink struct {
 
 func (s *sequenceSink) Name() string { return "sequence" }
 
-func (s *sequenceSink) WriteEvent(context.Context, []byte, *loxa.Event) error {
+func (s *sequenceSink) WriteEvent(context.Context, []byte, *collectorevent.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := s.writes

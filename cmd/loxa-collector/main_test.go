@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"github.com/astraive/loxa-collector/internal/ingest"
 	storagepath "github.com/astraive/loxa-collector/internal/storage"
-	"github.com/astraive/loxa-go"
 	"golang.org/x/time/rate"
 )
 
@@ -27,7 +27,7 @@ type fakeSink struct {
 }
 
 func (s *fakeSink) Name() string { return "fake" }
-func (s *fakeSink) WriteEvent(_ context.Context, encoded []byte, _ *loxa.Event) error {
+func (s *fakeSink) WriteEvent(_ context.Context, encoded []byte, _ *collectorevent.Event) error {
 	if s.fail {
 		return context.DeadlineExceeded
 	}
@@ -44,7 +44,7 @@ type errSink struct {
 }
 
 func (s errSink) Name() string { return "err" }
-func (s errSink) WriteEvent(context.Context, []byte, *loxa.Event) error {
+func (s errSink) WriteEvent(context.Context, []byte, *collectorevent.Event) error {
 	return s.err
 }
 func (s errSink) Flush(context.Context) error { return nil }

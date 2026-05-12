@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	processing "github.com/astraive/loxa-collector/internal/processing"
-	"github.com/astraive/loxa-go"
-	"github.com/astraive/loxa-go/sinks/duckdb"
+	"github.com/astraive/loxa-collector/internal/sinks/duckdb"
 	_ "github.com/marcboeker/go-duckdb"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -307,7 +307,7 @@ func (s *workerState) handleRecord(ctx context.Context, record queueRecord) {
 	}
 }
 
-func sinksForShutdown(primary loxa.Sink, secondary []processing.NamedSink, fallback *processing.NamedSink) []processing.NamedSink {
+func sinksForShutdown(primary collectorevent.Sink, secondary []processing.NamedSink, fallback *processing.NamedSink) []processing.NamedSink {
 	sinks := []processing.NamedSink{{Name: "primary", Sink: primary}}
 	sinks = append(sinks, secondary...)
 	if fallback != nil {

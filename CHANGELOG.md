@@ -15,23 +15,20 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- Multi-module workspace split with `go.work`:
-  - core (`github.com/astraive/loxa-go`)
-  - optional middleware (`github.com/astraive/loxa-go/middleware`)
-  - optional integrations (`github.com/astraive/loxa-go/integrations`)
-  - optional sinks (`github.com/astraive/loxa-go/sinks`)
-  - proto/contracts (`github.com/astraive/loxa-go/proto`)
-- New `testkit` package for test capture/assert helpers.
-- Dependency boundary conformance test for root module.
-- Example set for net/http, slog bridge, custom schema, OTLP, and Kafka.
+- Collector owns production delivery:
+  - Kafka, ClickHouse, Postgres, DuckDB, OTLP, S3, GCS, and Loki sink implementations are collector-side code.
+  - application SDKs emit to the collector through lightweight transports.
+- Collector-local event and sink contracts under `internal/event`.
+- Dependency boundary removed: collector no longer imports or requires any LOXA SDK module.
+- Collector fanout and worker paths cover heavy production sinks.
 
 ### Changed
 
-- Root module dependency graph slimmed to core-only requirements.
+- Collector module dependency graph no longer includes any LOXA SDK module.
+- Removed dependency on the old SDK sinks module.
 - Integration DuckDB stress test uses temp DB path to avoid cross-run file lock collisions.
 - README/docs repositioned LOXA as canonical wide-event layer.
 
 ### Breaking
 
-- Removed `loxa.Capture` and `loxa.AssertEvent`; use `github.com/astraive/loxa-go/testkit`.
-- Removed root middleware wrapper; use `github.com/astraive/loxa-go/middleware/nethttp`.
+- Collector sink implementations now use `github.com/astraive/loxa-collector/internal/event` instead of SDK-owned interfaces.

@@ -1,4 +1,4 @@
-project_name: loxa-go
+project_name: loxa-collector
 version: 0.1.0
 archives:
   - format: tar.gz
@@ -63,5 +63,5 @@ changelog:
 release:
   github:
     owner: Astraive
-    name: loxa-go
+    name: loxa-collector
   draft: true

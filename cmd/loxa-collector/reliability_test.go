@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/astraive/loxa-go"
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"golang.org/x/time/rate"
 )
 
@@ -22,7 +22,7 @@ type capturedSink struct {
 }
 
 func (s *capturedSink) Name() string { return "captured" }
-func (s *capturedSink) WriteEvent(_ context.Context, encoded []byte, _ *loxa.Event) error {
+func (s *capturedSink) WriteEvent(_ context.Context, encoded []byte, _ *collectorevent.Event) error {
 	cp := make([]byte, len(encoded))
 	copy(cp, encoded)
 	s.mu.Lock()

@@ -11,7 +11,7 @@ Key binaries:
 Contract and SDK:
 
 - event contract: `Astraive/loxa-spec`
-- Go SDK: `Astraive/loxa-go`
+- application SDKs emit canonical wide events to the collector over documented ingest protocols
 - operations CLI: `Astraive/loxa-cli`
 
 Local run example:

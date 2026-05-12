@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"github.com/astraive/loxa-collector/internal/validation"
-	"github.com/astraive/loxa-go"
 )
 
 var ErrInvalidEvent = errors.New("invalid event payload: expected JSON object")
@@ -63,7 +63,7 @@ type SchemaRegistryEntry struct {
 
 type NamedSink struct {
 	Name string
-	Sink loxa.Sink
+	Sink collectorevent.Sink
 }
 
 type SinkDeliveryFailure struct {
@@ -118,7 +118,7 @@ type Result struct {
 
 type Processor struct {
 	cfg            Config
-	primarySink    loxa.Sink
+	primarySink    collectorevent.Sink
 	secondarySinks []NamedSink
 	fallbackSink   *NamedSink
 	rng            *rand.Rand
@@ -130,7 +130,7 @@ type Processor struct {
 	dedupeSeenAt   map[string]time.Time
 }
 
-func New(cfg Config, primary loxa.Sink, secondary []NamedSink, fallback *NamedSink, rng *rand.Rand) (*Processor, error) {
+func New(cfg Config, primary collectorevent.Sink, secondary []NamedSink, fallback *NamedSink, rng *rand.Rand) (*Processor, error) {
 	if primary == nil {
 		return nil, errors.New("primary sink is required")
 	}

@@ -8,14 +8,14 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	processing "github.com/astraive/loxa-collector/internal/processing"
-	"github.com/astraive/loxa-go"
-	"github.com/astraive/loxa-go/sinks/clickhouse"
-	"github.com/astraive/loxa-go/sinks/duckdb"
-	"github.com/astraive/loxa-go/sinks/gcs"
-	"github.com/astraive/loxa-go/sinks/loki"
-	"github.com/astraive/loxa-go/sinks/otlp"
-	"github.com/astraive/loxa-go/sinks/s3"
+	"github.com/astraive/loxa-collector/internal/sinks/clickhouse"
+	"github.com/astraive/loxa-collector/internal/sinks/duckdb"
+	"github.com/astraive/loxa-collector/internal/sinks/gcs"
+	"github.com/astraive/loxa-collector/internal/sinks/loki"
+	"github.com/astraive/loxa-collector/internal/sinks/otlp"
+	"github.com/astraive/loxa-collector/internal/sinks/s3"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	s3svc "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -94,7 +94,7 @@ func createFanoutSinks(cfg collectorConfig) ([]namedSink, *namedSink, []*sql.DB,
 		}
 
 		var (
-			sink loxa.Sink
+			sink collectorevent.Sink
 			db   *sql.DB
 			err  error
 		)
@@ -145,7 +145,7 @@ func createFanoutSinks(cfg collectorConfig) ([]namedSink, *namedSink, []*sql.DB,
 	return secondary, fallback, dbs, nil
 }
 
-func newDuckDBFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (loxa.Sink, *sql.DB, error) {
+func newDuckDBFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (collectorevent.Sink, *sql.DB, error) {
 	path := strings.TrimSpace(output.duckDBPath)
 	if path == "" {
 		return nil, nil, fmt.Errorf("fanout output %q: duckdb.path must not be empty", output.name)
@@ -198,7 +198,7 @@ func newDuckDBFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (lox
 	return sink, db, nil
 }
 
-func newLokiFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
+func newLokiFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if strings.TrimSpace(output.lokiURL) == "" {
 		return nil, fmt.Errorf("fanout output %q: loki.url must not be empty", output.name)
 	}
@@ -212,7 +212,7 @@ func newLokiFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
 	})
 }
 
-func newOTLPFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
+func newOTLPFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if strings.TrimSpace(output.otlpEndpoint) == "" {
 		return nil, fmt.Errorf("fanout output %q: otlp.endpoint must not be empty", output.name)
 	}
@@ -225,7 +225,7 @@ func newOTLPFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
 	})
 }
 
-func newClickHouseFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
+func newClickHouseFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if len(output.chAddrs) == 0 {
 		return nil, fmt.Errorf("fanout output %q: clickhouse.addrs must not be empty", output.name)
 	}
@@ -241,7 +241,7 @@ func newClickHouseFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
 	})
 }
 
-func newS3FanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
+func newS3FanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if output.s3Bucket == "" {
 		return nil, fmt.Errorf("fanout output %q: s3.bucket must not be empty", output.name)
 	}
@@ -275,7 +275,7 @@ func newS3FanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
 	})
 }
 
-func newGCSFanoutSink(output collectorFanoutOutput) (loxa.Sink, error) {
+func newGCSFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if output.gcsBucket == "" {
 		return nil, fmt.Errorf("fanout output %q: gcs.bucket must not be empty", output.name)
 	}

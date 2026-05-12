@@ -10,9 +10,9 @@ import (
 	"time"
 
 	collectorconfig "github.com/astraive/loxa-collector/internal/config"
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	processing "github.com/astraive/loxa-collector/internal/processing"
 	serverconfig "github.com/astraive/loxa-collector/internal/server"
-	"github.com/astraive/loxa-go"
 	"golang.org/x/time/rate"
 )
 
@@ -127,7 +127,7 @@ type collectorMetrics struct {
 
 type collectorState struct {
 	cfg               collectorConfig
-	ingestSink        loxa.Sink
+	ingestSink        collectorevent.Sink
 	secondarySinks    []namedSink
 	fallbackSink      *namedSink
 	ready             atomic.Bool

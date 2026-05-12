@@ -15,11 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	processing "github.com/astraive/loxa-collector/internal/processing"
+	"github.com/astraive/loxa-collector/internal/sinks/duckdb"
+	kafkasink "github.com/astraive/loxa-collector/internal/sinks/kafka"
 	storagepath "github.com/astraive/loxa-collector/internal/storage"
-	"github.com/astraive/loxa-go"
-	"github.com/astraive/loxa-go/sinks/duckdb"
-	kafkasink "github.com/astraive/loxa-go/sinks/kafka"
 	_ "github.com/marcboeker/go-duckdb"
 	"golang.org/x/time/rate"
 )
@@ -28,7 +28,7 @@ func runCollector(cfg collectorConfig) error {
 	var (
 		db             *sql.DB
 		err            error
-		sink           loxa.Sink
+		sink           collectorevent.Sink
 		secondarySinks []namedSink
 		fallbackSink   *namedSink
 		fanoutDBs      []*sql.DB

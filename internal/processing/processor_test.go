@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/astraive/loxa-go"
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 )
 
 type fakeSink struct {
@@ -22,7 +22,7 @@ type fakeSink struct {
 
 func (s *fakeSink) Name() string { return "fake" }
 
-func (s *fakeSink) WriteEvent(context.Context, []byte, *loxa.Event) error {
+func (s *fakeSink) WriteEvent(context.Context, []byte, *collectorevent.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	idx := s.writes

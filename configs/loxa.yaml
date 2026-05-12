@@ -1,4 +1,4 @@
-# loxa.yaml — Unified configuration for loxa-collector, loxa-cli, and loxa-go
+# loxa.yaml — collector runtime configuration.
 # Place this file at the project root or set LOXA_CONFIG_PATH to override.
 # All values can be overridden via environment variables (see docs).
 

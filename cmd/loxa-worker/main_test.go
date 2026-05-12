@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	processing "github.com/astraive/loxa-collector/internal/processing"
-	"github.com/astraive/loxa-go"
 )
 
 type testSink struct {
@@ -19,7 +19,7 @@ type testSink struct {
 
 func (s *testSink) Name() string { return "test" }
 
-func (s *testSink) WriteEvent(context.Context, []byte, *loxa.Event) error {
+func (s *testSink) WriteEvent(context.Context, []byte, *collectorevent.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.writes++

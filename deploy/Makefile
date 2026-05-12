@@ -18,6 +18,6 @@ generate:
 	@command -v protoc-gen-go >/dev/null 2>&1 || (echo "protoc-gen-go is required"; exit 1)
 	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || (echo "protoc-gen-go-grpc is required"; exit 1)
 	protoc -I $(PROTO_DIR) \
-	  --go_out=. --go_opt=module=github.com/astraive/loxa-go \
-	  --go-grpc_out=. --go-grpc_opt=module=github.com/astraive/loxa-go \
+	  --go_out=. --go_opt=module=github.com/astraive/loxa-collector \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/astraive/loxa-collector \
 	  $(PROTO_FILES)
