@@ -18,6 +18,7 @@ func (s *collectorState) initReliability() error {
 	if s.cfg.reliabilityMode != "spool" {
 		return nil
 	}
+	s.reliabilityCtx, s.reliabilityCancel = context.WithCancel(context.Background())
 	if err := os.MkdirAll(s.cfg.spoolDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir spool dir: %w", err)
 	}
@@ -101,15 +102,22 @@ func (s *collectorState) saveSpoolPosition() error {
 }
 
 func (s *collectorState) closeReliability() {
+	if s.reliabilityCancel != nil {
+		s.reliabilityCancel()
+	}
 	if s.deliveryStop != nil {
 		close(s.deliveryStop)
 		s.deliveryWG.Wait()
 	}
 	if s.spoolFile != nil {
-		_ = s.spoolFile.Close()
+		if err := s.spoolFile.Close(); err != nil {
+			logJSON("error", "spool_close_failed", map[string]any{"error": err.Error()})
+		}
 	}
 	if s.processor != nil {
-		_ = s.processor.Close()
+		if err := s.processor.Close(); err != nil {
+			logJSON("error", "processor_close_failed", map[string]any{"error": err.Error()})
+		}
 	}
 }
 
@@ -140,7 +148,8 @@ func (s *collectorState) enqueueDelivery(raw []byte) {
 	select {
 	case s.deliveryQueue <- cp:
 	default:
-		go func() { s.deliveryQueue <- cp }()
+		s.metrics.sinkWriteErrors.Add(1)
+		logJSON("warn", "delivery_queue_full_dropping_event", nil)
 	}
 }
 
@@ -164,7 +173,11 @@ func (s *collectorState) processSpoolEvent(raw []byte) {
 		return
 	}
 
-	result := s.processor.Process(context.Background(), raw)
+	ctx := s.reliabilityCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := s.processor.Process(ctx, raw)
 	if failures := result.Outcome.FailureCount(); failures > 0 {
 		s.metrics.sinkWriteErrors.Add(int64(failures))
 	}
@@ -221,10 +234,12 @@ func (s *collectorState) truncateSpoolAfterDelivery(raw []byte) {
 					}
 					s.spoolProcessedPos = newPos
 					s.metrics.spoolBytes.Store(currentSize - newPos)
-					_ = s.saveSpoolPosition()
+					if err := s.saveSpoolPosition(); err != nil {
+						logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
+					}
 					logJSON("info", "spool_truncated", map[string]any{
-						"new_size":  currentSize - newPos,
-						"new_pos":   newPos,
+						"new_size": currentSize - newPos,
+						"new_pos":  newPos,
 					})
 				}
 				break

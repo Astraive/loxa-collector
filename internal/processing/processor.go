@@ -40,8 +40,8 @@ type Config struct {
 	DedupeWindow            time.Duration
 	ValidateJSONObjects     bool
 	OnDiskFull              func()
-	OnDLQWrite              func(n int64)   // Called when DLQ write succeeds
-	OnDLQWriteFail          func(n int64)   // Called when DLQ write fails after retries
+	OnDLQWrite              func(n int64) // Called when DLQ write succeeds
+	OnDLQWriteFail          func(n int64) // Called when DLQ write fails after retries
 	Schema                  SchemaConfig
 }
 
@@ -308,7 +308,7 @@ func (p *Processor) writeQuarantine(raw []byte, err error) {
 	}
 	p.quarantineMu.Lock()
 	defer p.quarantineMu.Unlock()
-	
+
 	const maxRetries = 3
 	var lastWriteErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -319,7 +319,7 @@ func (p *Processor) writeQuarantine(raw []byte, err error) {
 		lastWriteErr = writeErr
 		time.Sleep(10 * time.Millisecond * time.Duration(attempt+1))
 	}
-	
+
 	fmt.Fprintf(os.Stderr, "[FATAL] quarantine write failed after %d attempts: %v, event: %s\n", maxRetries, lastWriteErr, string(raw))
 }
 
@@ -455,7 +455,9 @@ func (p *Processor) deliverWithRetry(ctx context.Context, raw []byte) (DeliveryO
 			sleep = time.Duration(float64(sleep) * (0.8 + 0.4*p.rng.Float64()))
 		}
 		if sleep > 0 {
-			time.Sleep(sleep)
+			if err := sleepContext(ctx, sleep); err != nil {
+				return last, err
+			}
 		}
 		if backoff > 0 {
 			backoff *= 2
@@ -468,6 +470,17 @@ func (p *Processor) deliverWithRetry(ctx context.Context, raw []byte) (DeliveryO
 		last.PolicyErr = errors.New("delivery failed")
 	}
 	return last, last.PolicyErr
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (p *Processor) writeDLQ(raw []byte, err error) {
@@ -490,7 +503,7 @@ func (p *Processor) writeDLQ(raw []byte, err error) {
 	}
 	p.dlqMu.Lock()
 	defer p.dlqMu.Unlock()
-	
+
 	// Retry logic for DLQ writes
 	const maxRetries = 3
 	var lastWriteErr error
@@ -506,7 +519,7 @@ func (p *Processor) writeDLQ(raw []byte, err error) {
 		// Brief backoff before retry
 		time.Sleep(10 * time.Millisecond * time.Duration(attempt+1))
 	}
-	
+
 	// All retries failed - this is a critical failure
 	fmt.Fprintf(os.Stderr, "[FATAL] DLQ write failed after %d attempts: %v, event: %s\n", maxRetries, lastWriteErr, string(raw))
 	if p.cfg.OnDLQWriteFail != nil {

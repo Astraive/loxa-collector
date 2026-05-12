@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -20,27 +21,27 @@ var (
 )
 
 type Event struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Payload   []byte    `json:"payload"`
-	Attempts  int       `json:"attempts"`
+	ID        string         `json:"id"`
+	Timestamp time.Time      `json:"timestamp"`
+	Payload   []byte         `json:"payload"`
+	Attempts  int            `json:"attempts"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 type QueueConfig struct {
-	Directory          string
-	MaxSizeBytes       int64
-	MaxEvents          int
-	BatchSize          int
-	BatchTimeout       time.Duration
-	FlushInterval      time.Duration
-	Sink               Sink
-	SinkName           string
-	RetryEnabled       bool
-	RetryMaxAttempts   int
-	RetryInitialBackoff time.Duration
-	RetryMaxBackoff    time.Duration
-	RetryJitter        bool
+	Directory               string
+	MaxSizeBytes            int64
+	MaxEvents               int
+	BatchSize               int
+	BatchTimeout            time.Duration
+	FlushInterval           time.Duration
+	Sink                    Sink
+	SinkName                string
+	RetryEnabled            bool
+	RetryMaxAttempts        int
+	RetryInitialBackoff     time.Duration
+	RetryMaxBackoff         time.Duration
+	RetryJitter             bool
 	CircuitBreakerThreshold int
 	CircuitBreakerTimeout   time.Duration
 	CircuitBreakerHalfOpen  bool
@@ -54,32 +55,32 @@ type Sink interface {
 }
 
 type State struct {
-	Enqueued    int64 `json:"enqueued"`
-	Flushed     int64 `json:"flushed"`
-	Failed      int64 `json:"failed"`
-	Retried     int64 `json:"retried"`
+	Enqueued      int64 `json:"enqueued"`
+	Flushed       int64 `json:"flushed"`
+	Failed        int64 `json:"failed"`
+	Retried       int64 `json:"retried"`
 	Backpressured int64 `json:"backpressured"`
-	InFlight   int64 `json:"in_flight"`
-	CircuitOpen bool  `json:"circuit_open"`
+	InFlight      int64 `json:"in_flight"`
+	CircuitOpen   bool  `json:"circuit_open"`
 }
 
 type Queue struct {
-	cfg        QueueConfig
-	events     []Event
-	mu         sync.Mutex
-	cond       *sync.Cond
-	closed     bool
-	
-	inflight     map[string]Event
-	inflightMu   sync.Mutex
-	
+	cfg    QueueConfig
+	events []Event
+	mu     sync.Mutex
+	cond   *sync.Cond
+	closed bool
+
+	inflight   map[string]Event
+	inflightMu sync.Mutex
+
 	circuitFailures int
 	circuitOpenTime time.Time
 	circuitMu       sync.Mutex
-	
-	state      State
-	stateMu    sync.RWMutex
-	
+
+	state   State
+	stateMu sync.RWMutex
+
 	stopCh    chan struct{}
 	flushDone chan struct{}
 	wg        sync.WaitGroup
@@ -123,12 +124,12 @@ func NewQueue(cfg QueueConfig) (*Queue, error) {
 	}
 
 	q := &Queue{
-		cfg:        cfg,
-		events:     make([]Event, 0, cfg.BatchSize),
-		inflight:   make(map[string]Event),
-		stopCh:     make(chan struct{}),
-		flushDone:  make(chan struct{}, 1),
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+		cfg:       cfg,
+		events:    make([]Event, 0, cfg.BatchSize),
+		inflight:  make(map[string]Event),
+		stopCh:    make(chan struct{}),
+		flushDone: make(chan struct{}, 1),
+		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	q.cond = sync.NewCond(&q.mu)
@@ -141,7 +142,7 @@ func NewQueue(cfg QueueConfig) (*Queue, error) {
 
 func (q *Queue) Enqueue(ctx context.Context, event Event) error {
 	if event.ID == "" {
-		event.ID = generateEventID()
+		event.ID = q.generateEventID()
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
@@ -208,7 +209,7 @@ func (q *Queue) EnqueueBatch(ctx context.Context, events []Event) []error {
 
 	for i, event := range events {
 		if event.ID == "" {
-			event.ID = generateEventID()
+			event.ID = q.generateEventID()
 		}
 		if event.Timestamp.IsZero() {
 			event.Timestamp = time.Now()
@@ -261,27 +262,35 @@ func (q *Queue) flushLoop() {
 			q.mu.Unlock()
 			return
 		case <-ticker.C:
-			q.doFlush()
+			q.mu.Lock()
+			if len(q.events) > 0 {
+				q.mu.Unlock()
+				if err := q.doFlush(); err != nil {
+					log.Printf("queue flush error: %v", err)
+				}
+			} else {
+				q.mu.Unlock()
+			}
 		default:
 			q.mu.Lock()
 			if len(q.events) >= q.cfg.BatchSize {
 				q.mu.Unlock()
-				q.doFlush()
-			} else if len(q.events) > 0 {
-				q.cond.Wait()
-			} else {
-				q.cond.Wait()
+				if err := q.doFlush(); err != nil {
+					log.Printf("queue flush error: %v", err)
+				}
+				continue
 			}
+			q.cond.Wait()
 			q.mu.Unlock()
 		}
 	}
 }
 
-func (q *Queue) doFlush() {
+func (q *Queue) doFlush() error {
 	q.mu.Lock()
 	if len(q.events) == 0 {
 		q.mu.Unlock()
-		return
+		return nil
 	}
 
 	events := make([]Event, len(q.events))
@@ -304,6 +313,10 @@ func (q *Queue) doFlush() {
 		q.recordFailure()
 	}
 
+	if flushErr == nil {
+		q.recordSuccess()
+	}
+
 	q.inflightMu.Lock()
 	q.stateMu.Lock()
 
@@ -313,7 +326,6 @@ func (q *Queue) doFlush() {
 		}
 		q.state.Flushed += int64(len(events))
 		q.state.InFlight -= int64(len(events))
-		q.recordSuccess()
 	} else {
 		q.state.Failed += int64(len(events))
 		if q.cfg.RetryEnabled {
@@ -335,7 +347,10 @@ func (q *Queue) doFlush() {
 	q.stateMu.Unlock()
 	q.inflightMu.Unlock()
 
-	_ = q.cfg.Sink.Flush(ctx)
+	if err := q.cfg.Sink.Flush(ctx); err != nil {
+		return fmt.Errorf("sink flush: %w", err)
+	}
+	return flushErr
 }
 
 func (q *Queue) recordFailure() {
@@ -407,15 +422,15 @@ func (q *Queue) Close() error {
 	return q.cfg.Sink.Close(ctx)
 }
 
-func generateEventID() string {
-	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomString(16))
+func (q *Queue) generateEventID() string {
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomString(q.rng, 16))
 }
 
-func randomString(n int) string {
+func randomString(rng *rand.Rand, n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+		b[i] = letters[rng.Intn(len(letters))]
 	}
 	return string(b)
 }
@@ -427,10 +442,10 @@ type DiskSinkConfig struct {
 }
 
 type DiskSink struct {
-	cfg     DiskSinkConfig
-	file    *os.File
-	mu      sync.Mutex
-	pos     int64
+	cfg  DiskSinkConfig
+	file *os.File
+	mu   sync.Mutex
+	pos  int64
 }
 
 func NewDiskSink(cfg DiskSinkConfig) (*DiskSink, error) {
@@ -477,6 +492,7 @@ func (s *DiskSink) WriteBatch(ctx context.Context, events [][]byte) error {
 	}
 
 	var payload []byte
+	var marshalErrs []error
 	for _, e := range events {
 		event := Event{
 			Timestamp: time.Now(),
@@ -484,10 +500,14 @@ func (s *DiskSink) WriteBatch(ctx context.Context, events [][]byte) error {
 		}
 		data, err := json.Marshal(event)
 		if err != nil {
+			marshalErrs = append(marshalErrs, fmt.Errorf("marshal event %s: %w", event.ID, err))
 			continue
 		}
 		payload = append(payload, data...)
 		payload = append(payload, '\n')
+	}
+	if len(marshalErrs) > 0 {
+		return errors.Join(marshalErrs...)
 	}
 
 	n, err := s.file.Write(payload)
@@ -509,14 +529,24 @@ func (s *DiskSink) rotateFile() error {
 	for i := s.cfg.MaxFiles - 1; i > 0; i-- {
 		oldPath := filepath.Join(dir, fmt.Sprintf("%s.%d%s", name, i, ext))
 		newPath := filepath.Join(dir, fmt.Sprintf("%s.%d%s", name, i+1, ext))
-		os.Rename(oldPath, newPath)
+		if err := os.Rename(oldPath, newPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 
 	currentPath := filepath.Join(dir, fmt.Sprintf("%s.0%s", name, ext))
 	if err := s.file.Close(); err != nil {
 		return err
 	}
-	os.Rename(s.cfg.Path, currentPath)
+	if err := os.Rename(s.cfg.Path, currentPath); err != nil {
+		f, openErr := os.OpenFile(s.cfg.Path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
+		if openErr != nil {
+			return err
+		}
+		s.file = f
+		s.pos = 0
+		return err
+	}
 
 	f, err := os.OpenFile(s.cfg.Path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

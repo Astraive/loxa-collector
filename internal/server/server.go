@@ -7,22 +7,23 @@ import (
 )
 
 type MultiServer struct {
-	cfg       Config
-	state     State
-	servers   []Server
-	ready     bool
-	mu        sync.Mutex
-	started   bool
-	stopped   bool
-	stopCh    chan struct{}
-	stopWG    sync.WaitGroup
+	cfg      Config
+	state    State
+	servers  []Server
+	ready    bool
+	mu       sync.Mutex
+	started  bool
+	stopped  bool
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	stopWG   sync.WaitGroup
 }
 
 func NewMultiServer(cfg Config, state State) *MultiServer {
 	return &MultiServer{
-		cfg:     cfg,
-		state:   state,
-		stopCh:  make(chan struct{}),
+		cfg:    cfg,
+		state:  state,
+		stopCh: make(chan struct{}),
 	}
 }
 
@@ -33,7 +34,6 @@ func (ms *MultiServer) Run(ctx context.Context) error {
 		return nil
 	}
 	ms.started = true
-	ms.mu.Unlock()
 
 	if ms.cfg.HTTP.Enabled {
 		ms.servers = append(ms.servers, NewHTTPServer(ms.cfg.HTTP, ms.state))
@@ -46,9 +46,11 @@ func (ms *MultiServer) Run(ctx context.Context) error {
 	}
 
 	if len(ms.servers) == 0 {
+		ms.mu.Unlock()
 		log.Println("no servers enabled, nothing to do")
 		return nil
 	}
+	ms.mu.Unlock()
 
 	serverCh := make(chan error, len(ms.servers))
 	for _, srv := range ms.servers {
@@ -57,14 +59,21 @@ func (ms *MultiServer) Run(ctx context.Context) error {
 			defer ms.stopWG.Done()
 			log.Printf("starting %s server on %s", s.Name(), s.Addr())
 			if err := s.Start(ctx); err != nil {
-				serverCh <- err
+				select {
+				case serverCh <- err:
+				case <-ms.stopCh:
+				case <-ctx.Done():
+				}
 			}
 		}(srv)
 	}
 
+	var startErr error
 	select {
-	case err := <-serverCh:
-		return err
+	case startErr = <-serverCh:
+		ms.closeStopCh()
+		ms.stopWG.Wait()
+		return startErr
 	case <-ms.stopCh:
 		return ms.shutdown(ctx)
 	case <-ctx.Done():
@@ -81,7 +90,7 @@ func (ms *MultiServer) shutdown(ctx context.Context) error {
 	ms.stopped = true
 	ms.mu.Unlock()
 
-	close(ms.stopCh)
+	ms.closeStopCh()
 
 	errCh := make(chan error, len(ms.servers))
 	for _, srv := range ms.servers {
@@ -111,7 +120,15 @@ func (ms *MultiServer) shutdown(ctx context.Context) error {
 	return nil
 }
 
+func (ms *MultiServer) closeStopCh() {
+	ms.stopOnce.Do(func() {
+		close(ms.stopCh)
+	})
+}
+
 func (ms *MultiServer) IsReady() bool {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	for _, srv := range ms.servers {
 		if !srv.IsReady() {
 			return false

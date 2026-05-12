@@ -189,12 +189,16 @@ func TestDLQContainsRawAndReason(t *testing.T) {
 
 	state.handleIngest(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader(`{"event_id":"dlq-1","event":"a"}`)))
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if state.metrics.sinkWriteErrors.Load() > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	if state.metrics.sinkWriteErrors.Load() == 0 {
+		t.Fatalf("sinkWriteErrors never incremented (retry loop may be infinite)")
 	}
 
 	// read DLQ file

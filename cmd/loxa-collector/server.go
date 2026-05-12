@@ -46,9 +46,9 @@ func runCollector(cfg collectorConfig) error {
 			return fmt.Errorf("failed to create kafka sink: %w", err)
 		}
 		logJSON("info", "kafka_sink_initialized", map[string]any{
-			"brokers":       cfg.kafkaBrokers,
-			"topic":         cfg.kafkaTopic,
-			"reliability":   "at-least-once (configure broker/producer for exactly-once)",
+			"brokers":     cfg.kafkaBrokers,
+			"topic":       cfg.kafkaTopic,
+			"reliability": "at-least-once (configure broker/producer for exactly-once)",
 		})
 	} else {
 		db, err = sql.Open(cfg.duckDBDriver, cfg.duckDBPath)
@@ -226,18 +226,30 @@ func buildMux(state *collectorState) *http.ServeMux {
 func ensureSchema(db *sql.DB, cfg collectorConfig) error {
 	columns := make([]string, 0, len(cfg.duckDBSchema)+1)
 	for col, path := range cfg.duckDBSchema {
+		colIdent, err := quoteSQLIdent(col)
+		if err != nil {
+			return err
+		}
 		if typ, ok := cfg.duckDBColumnTypes[path]; ok {
-			columns = append(columns, fmt.Sprintf("%s %s", col, typ))
+			columns = append(columns, fmt.Sprintf("%s %s", colIdent, typ))
 		} else {
-			columns = append(columns, fmt.Sprintf("%s TEXT", col))
+			columns = append(columns, fmt.Sprintf("%s TEXT", colIdent))
 		}
 	}
 	if cfg.duckDBStoreRaw {
-		columns = append(columns, fmt.Sprintf("%s TEXT", cfg.duckDBRawColumn))
+		rawIdent, err := quoteSQLIdent(cfg.duckDBRawColumn)
+		if err != nil {
+			return err
+		}
+		columns = append(columns, fmt.Sprintf("%s TEXT", rawIdent))
 	}
-	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", cfg.duckDBTable, strings.Join(columns, ", "))
-	_, err := db.Exec(query)
-	return err
+	tableIdent, err := quoteSQLIdent(cfg.duckDBTable)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableIdent, strings.Join(columns, ", "))
+	_, execErr := db.Exec(query)
+	return execErr
 }
 
 func runPeriodicCheckpoint(db *sql.DB, interval time.Duration, stop <-chan struct{}, wg *sync.WaitGroup) {
@@ -280,7 +292,26 @@ func exportDuckDBParquet(db *sql.DB, cfg collectorConfig) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	query := fmt.Sprintf("COPY %s TO '%s' (FORMAT PARQUET)", cfg.duckDBTable, strings.ReplaceAll(target, "\\", "/"))
-	_, err := db.Exec(query)
-	return err
+	tableIdent, err := quoteSQLIdent(cfg.duckDBTable)
+	if err != nil {
+		return err
+	}
+	query := fmt.Sprintf("COPY %s TO %s (FORMAT PARQUET)", tableIdent, quoteSQLString(strings.ReplaceAll(target, "\\", "/")))
+	_, execErr := db.Exec(query)
+	return execErr
+}
+
+func quoteSQLIdent(ident string) (string, error) {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return "", fmt.Errorf("sql identifier cannot be empty")
+	}
+	if !configIdentPattern.MatchString(ident) {
+		return "", fmt.Errorf("invalid sql identifier %q", ident)
+	}
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`, nil
+}
+
+func quoteSQLString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

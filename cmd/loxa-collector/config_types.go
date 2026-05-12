@@ -98,10 +98,10 @@ type collectorConfig struct {
 	kafkaBrokers            []string
 	kafkaTopic              string
 	kafkaAcks               string
-	kafkaRequestTimeout    time.Duration
-	kafkaIdempotence       bool
-	kafkaMaxRetries        int
-	kafkaRetryBackoff      time.Duration
+	kafkaRequestTimeout     time.Duration
+	kafkaIdempotence        bool
+	kafkaMaxRetries         int
+	kafkaRetryBackoff       time.Duration
 	workerConsumerGroup     string
 	workerPollTimeout       time.Duration
 	schemaMode              string
@@ -112,13 +112,13 @@ type collectorConfig struct {
 }
 
 type collectorMetrics struct {
-	requestsTotal     atomic.Int64
-	requestsAuthErr   atomic.Int64
-	requestsLimited   atomic.Int64
-	eventsAccepted    atomic.Int64
-	eventsInvalid     atomic.Int64
-	eventsRejected    atomic.Int64
-	eventsDeduped     atomic.Int64
+	requestsTotal    atomic.Int64
+	requestsAuthErr  atomic.Int64
+	requestsLimited  atomic.Int64
+	eventsAccepted   atomic.Int64
+	eventsInvalid    atomic.Int64
+	eventsRejected   atomic.Int64
+	eventsDeduped    atomic.Int64
 	sinkWriteErrors  atomic.Int64
 	spoolBytes       atomic.Int64
 	retryAttempts    atomic.Int64
@@ -126,30 +126,32 @@ type collectorMetrics struct {
 }
 
 type collectorState struct {
-	cfg            collectorConfig
-	ingestSink     loxa.Sink
-	secondarySinks []namedSink
-	fallbackSink   *namedSink
-	ready          atomic.Bool
-	sinkHealthy    atomic.Bool
-	spoolHealthy   atomic.Bool
-	diskHealthy    atomic.Bool
-	rateLimiter    *rate.Limiter
-	metrics        collectorMetrics
-	rng            *rand.Rand
-	spoolFile      *os.File
-	spoolPosFile   string
+	cfg               collectorConfig
+	ingestSink        loxa.Sink
+	secondarySinks    []namedSink
+	fallbackSink      *namedSink
+	ready             atomic.Bool
+	sinkHealthy       atomic.Bool
+	spoolHealthy      atomic.Bool
+	diskHealthy       atomic.Bool
+	rateLimiter       *rate.Limiter
+	metrics           collectorMetrics
+	rng               *rand.Rand
+	spoolFile         *os.File
+	spoolPosFile      string
 	spoolProcessedPos int64
-	spoolMu        sync.Mutex
-	deliveryQueue  chan []byte
-	deliveryStop   chan struct{}
-	deliveryWG     sync.WaitGroup
-	metricsInit    sync.Once
-	metricsHTTP    http.Handler
-	dedupeMu       sync.Mutex
-	dedupeSeenAt   map[string]time.Time
-	processorMu    sync.Mutex
-	processor      *processing.Processor
+	spoolMu           sync.Mutex
+	deliveryQueue     chan []byte
+	deliveryStop      chan struct{}
+	deliveryWG        sync.WaitGroup
+	metricsInit       sync.Once
+	metricsHTTP       http.Handler
+	dedupeMu          sync.Mutex
+	dedupeSeenAt      map[string]time.Time
+	processorMu       sync.Mutex
+	processor         *processing.Processor
+	reliabilityCtx    context.Context
+	reliabilityCancel context.CancelFunc
 }
 
 func (s *collectorState) GetMetrics() serverconfig.Metrics {
@@ -158,9 +160,9 @@ func (s *collectorState) GetMetrics() serverconfig.Metrics {
 		RequestsAuthErr: s.metrics.requestsAuthErr.Load(),
 		RequestsLimited: s.metrics.requestsLimited.Load(),
 		EventsAccepted:  s.metrics.eventsAccepted.Load(),
-		EventsInvalid:  s.metrics.eventsInvalid.Load(),
-		EventsRejected: s.metrics.eventsRejected.Load(),
-		EventsDeduped:  s.metrics.eventsDeduped.Load(),
+		EventsInvalid:   s.metrics.eventsInvalid.Load(),
+		EventsRejected:  s.metrics.eventsRejected.Load(),
+		EventsDeduped:   s.metrics.eventsDeduped.Load(),
 	}
 }
 
