@@ -13,6 +13,7 @@ import (
 	"time"
 
 	collectorconfig "github.com/astraive/loxa-collector/internal/config"
+	serverconfig "github.com/astraive/loxa-collector/internal/server"
 	"gopkg.in/yaml.v3"
 )
 
@@ -623,6 +624,49 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		shutdownTimeout:         fc.Collector.ShutdownTimeout,
 		maxBodyBytes:            fc.Collector.MaxBodyBytes,
 		maxEventsPerRequest:     fc.Collector.MaxEventsPerReq,
+		serverConfig: serverConfig{
+			HTTP: serverconfig.HTTPConfig{
+				Enabled:            fc.Collector.Server.HTTP.Enabled,
+				Addr:               fc.Collector.Server.HTTP.Addr,
+				ReadHeaderTimeout:  fc.Collector.Server.HTTP.ReadHeaderTimeout,
+				MaxBodyBytes:       fc.Collector.Server.HTTP.MaxBodyBytes,
+				MaxHeaderBytes:     fc.Collector.Server.HTTP.MaxHeaderBytes,
+				IdleTimeout:        fc.Collector.Server.HTTP.IdleTimeout,
+				IngestPath:         fc.Routes.Ingest,
+				HealthPath:         fc.Routes.Health,
+				ReadyPath:          fc.Routes.Ready,
+				MetricsPath:        fc.Routes.Metrics,
+				MetricsEnabled:     fc.Metrics.Prometheus,
+				AuthEnabled:        fc.Auth.Enabled,
+				AuthHeader:         fc.Auth.Header,
+				AuthValue:          fc.Auth.Value,
+				RateLimitEnabled:   fc.RateLimit.Enabled,
+				RateLimitRPS:       fc.RateLimit.RPS,
+				RateLimitBurst:     fc.RateLimit.Burst,
+			},
+			GRPC: serverconfig.GRPCConfig{
+				Enabled:               fc.Collector.Server.GRPC.Enabled,
+				Port:                  fc.Collector.Server.GRPC.Port,
+				MaxConnections:       fc.Collector.Server.GRPC.MaxConnections,
+				MaxConcurrentStreams:  fc.Collector.Server.GRPC.MaxConcurrentStreams,
+				MaxRecvMsgSize:       fc.Collector.Server.GRPC.MaxRecvMsgSize,
+				MaxSendMsgSize:       fc.Collector.Server.GRPC.MaxSendMsgSize,
+				MaxConnectionAge:     serverconfig.NewDuration(fc.Collector.Server.GRPC.Keepalive.MaxConnectionAge),
+				MaxConnectionAgeGrace: serverconfig.NewDuration(fc.Collector.Server.GRPC.Keepalive.MaxConnectionAgeGrace),
+				KeepaliveTime:        serverconfig.NewDuration(fc.Collector.Server.GRPC.Keepalive.Time),
+				KeepaliveTimeout:     serverconfig.NewDuration(fc.Collector.Server.GRPC.Keepalive.Timeout),
+				TLSEnabled:           fc.Collector.Server.GRPC.TLS.Enabled,
+				TLSCertFile:          fc.Collector.Server.GRPC.TLS.CertFile,
+				TLSKeyFile:           fc.Collector.Server.GRPC.TLS.KeyFile,
+			},
+			GraphQL: serverconfig.GraphQLConfig{
+				Enabled:    fc.Collector.Server.GraphQL.Enabled,
+				Port:       fc.Collector.Server.GraphQL.Port,
+				Playground: fc.Collector.Server.GraphQL.Playground,
+				DepthLimit: fc.Collector.Server.GraphQL.DepthLimit,
+				BatchLimit: fc.Collector.Server.GraphQL.BatchLimit,
+			},
+		},
 		authEnabled:             fc.Auth.Enabled,
 		apiKeyHeader:            fc.Auth.Header,
 		apiKey:                  fc.Auth.Value,

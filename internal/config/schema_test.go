@@ -1,92 +1,108 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestDefaultCoreSchema(t *testing.T) {
+func TestServerConfigDefaults(t *testing.T) {
 	cfg := Default()
 
-	if cfg.Collector.Addr != ":9090" || cfg.Collector.MaxEventsPerReq <= 0 {
-		t.Fatalf("unexpected collector defaults: %+v", cfg.Collector)
-	}
-	if cfg.Auth.Header == "" || cfg.Auth.ValueEnv == "" {
-		t.Fatalf("unexpected auth defaults: %+v", cfg.Auth)
-	}
-	if !cfg.RateLimit.Enabled || cfg.RateLimit.RPS <= 0 || cfg.RateLimit.Burst <= 0 {
-		t.Fatalf("unexpected rate limit defaults: %+v", cfg.RateLimit)
-	}
-	if cfg.Routes.Ingest == "" || cfg.Routes.Health == "" || cfg.Routes.Ready == "" || cfg.Routes.Metrics == "" {
-		t.Fatalf("unexpected routes defaults: %+v", cfg.Routes)
-	}
-	if cfg.Storage.Primary != "duckdb" {
-		t.Fatalf("unexpected storage default: %+v", cfg.Storage)
-	}
-	if cfg.DuckDB.Path == "" || cfg.DuckDB.Driver == "" || cfg.DuckDB.Table == "" {
-		t.Fatalf("unexpected duckdb defaults: %+v", cfg.DuckDB)
-	}
-	if cfg.Logging.Level == "" || cfg.Logging.Format == "" {
-		t.Fatalf("unexpected logging defaults: %+v", cfg.Logging)
-	}
-	if !cfg.Metrics.Prometheus {
-		t.Fatalf("unexpected metrics defaults: %+v", cfg.Metrics)
-	}
+	assert.True(t, cfg.Collector.Server.HTTP.Enabled)
+	assert.Equal(t, ":9090", cfg.Collector.Server.HTTP.Addr)
+	assert.Equal(t, 5*time.Second, cfg.Collector.Server.HTTP.ReadHeaderTimeout)
+	assert.Equal(t, int64(10*1024*1024), cfg.Collector.Server.HTTP.MaxBodyBytes)
+
+	assert.False(t, cfg.Collector.Server.GRPC.Enabled)
+	assert.Equal(t, ":9091", cfg.Collector.Server.GRPC.Port)
+	assert.Equal(t, 1000, cfg.Collector.Server.GRPC.MaxConnections)
+	assert.Equal(t, 100, cfg.Collector.Server.GRPC.MaxConcurrentStreams)
+
+	assert.False(t, cfg.Collector.Server.GraphQL.Enabled)
+	assert.Equal(t, ":9092", cfg.Collector.Server.GraphQL.Port)
+	assert.True(t, cfg.Collector.Server.GraphQL.Playground)
 }
 
-func TestYAMLUnmarshalCoreSchema(t *testing.T) {
-	raw := `
+func TestServerConfigYAML(t *testing.T) {
+	yaml := `
 collector:
-  addr: ":9191"
-  read_header_timeout: 2s
-auth:
-  enabled: true
-  header: X-Key
-  value_env: MY_KEY
-rate_limit:
-  enabled: false
-  rps: 120.5
-  burst: 200
-routes:
-  ingest: /in
-  health: /h
-  ready: /r
-  metrics: /m
-storage:
-  primary: duckdb
-duckdb:
-  path: collector.db
-  table: events_custom
-logging:
-  level: debug
-  format: json
-metrics:
-  prometheus: false
+  addr: ":9090"
+  server:
+    http:
+      enabled: true
+      addr: ":9090"
+      read_header_timeout: 10s
+      max_body_bytes: 20971520
+    grpc:
+      enabled: true
+      port: ":9091"
+      max_connections: 500
+      max_concurrent_streams: 50
+      keepalive:
+        max_connection_age: 10m
+        time: 5m
+    graphql:
+      enabled: true
+      port: ":9092"
+      playground: true
+      depth_limit: 15
 `
 
-	cfg := Default()
-	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
-		t.Fatalf("unmarshal config: %v", err)
-	}
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "loxa.yaml")
+	err := os.WriteFile(configFile, []byte(yaml), 0644)
+	require.NoError(t, err)
 
-	if cfg.Collector.Addr != ":9191" || cfg.Collector.ReadHeaderTimeout != 2*time.Second {
-		t.Fatalf("collector values not typed correctly: %+v", cfg.Collector)
-	}
-	if !cfg.Auth.Enabled || cfg.Auth.Header != "X-Key" || cfg.Auth.ValueEnv != "MY_KEY" {
-		t.Fatalf("auth values not typed correctly: %+v", cfg.Auth)
-	}
-	if cfg.RateLimit.Enabled || cfg.RateLimit.RPS != 120.5 || cfg.RateLimit.Burst != 200 {
-		t.Fatalf("rate_limit values not typed correctly: %+v", cfg.RateLimit)
-	}
-	if cfg.Routes.Ingest != "/in" || cfg.Storage.Primary != "duckdb" {
-		t.Fatalf("routes/storage values not typed correctly: %+v %+v", cfg.Routes, cfg.Storage)
-	}
-	if cfg.DuckDB.Path != "collector.db" || cfg.DuckDB.Table != "events_custom" {
-		t.Fatalf("duckdb values not typed correctly: %+v", cfg.DuckDB)
-	}
-	if cfg.Logging.Level != "debug" || cfg.Logging.Format != "json" || cfg.Metrics.Prometheus {
-		t.Fatalf("logging/metrics values not typed correctly: %+v %+v", cfg.Logging, cfg.Metrics)
-	}
+	cfg := Default()
+	err = LoadFile(&cfg, configFile)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Collector.Server.HTTP.Enabled)
+	assert.Equal(t, ":9090", cfg.Collector.Server.HTTP.Addr)
+	assert.Equal(t, 10*time.Second, cfg.Collector.Server.HTTP.ReadHeaderTimeout)
+	assert.Equal(t, int64(20971520), cfg.Collector.Server.HTTP.MaxBodyBytes)
+
+	assert.True(t, cfg.Collector.Server.GRPC.Enabled)
+	assert.Equal(t, ":9091", cfg.Collector.Server.GRPC.Port)
+	assert.Equal(t, 500, cfg.Collector.Server.GRPC.MaxConnections)
+	assert.Equal(t, 50, cfg.Collector.Server.GRPC.MaxConcurrentStreams)
+	assert.Equal(t, 10*time.Minute, cfg.Collector.Server.GRPC.Keepalive.MaxConnectionAge)
+	assert.Equal(t, 5*time.Minute, cfg.Collector.Server.GRPC.Keepalive.Time)
+
+	assert.True(t, cfg.Collector.Server.GraphQL.Enabled)
+	assert.Equal(t, ":9092", cfg.Collector.Server.GraphQL.Port)
+	assert.True(t, cfg.Collector.Server.GraphQL.Playground)
+	assert.Equal(t, 15, cfg.Collector.Server.GraphQL.DepthLimit)
+}
+
+func TestServerConfigTLS(t *testing.T) {
+	yaml := `
+collector:
+  server:
+    grpc:
+      enabled: true
+      port: ":9091"
+      tls:
+        enabled: true
+        cert_file: "/path/to/cert.pem"
+        key_file: "/path/to/key.pem"
+`
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "loxa.yaml")
+	err := os.WriteFile(configFile, []byte(yaml), 0644)
+	require.NoError(t, err)
+
+	cfg := Default()
+	err = LoadFile(&cfg, configFile)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Collector.Server.GRPC.TLS.Enabled)
+	assert.Equal(t, "/path/to/cert.pem", cfg.Collector.Server.GRPC.TLS.CertFile)
+	assert.Equal(t, "/path/to/key.pem", cfg.Collector.Server.GRPC.TLS.KeyFile)
 }

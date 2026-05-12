@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -161,4 +162,77 @@ func (s *collectorState) handleReady(w http.ResponseWriter, _ *http.Request) {
 
 func (s *collectorState) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metricsHandler().ServeHTTP(w, r)
+}
+
+func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]byte) (int, error) {
+	accepted := 0
+
+	for _, raw := range rawEvents {
+		if len(raw) == 0 {
+			continue
+		}
+
+		if s.cfg.reliabilityMode == "queue" {
+			if err := s.ingestSink.WriteEvent(ctx, raw, nil); err != nil {
+				s.metrics.sinkWriteErrors.Add(1)
+				if isDiskFullErr(err) {
+					s.diskHealthy.Store(false)
+				}
+				s.sinkHealthy.Store(false)
+				logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": err.Error()})
+				continue
+			}
+			s.sinkHealthy.Store(true)
+			accepted++
+			s.metrics.eventsAccepted.Add(1)
+			continue
+		}
+
+		if !validation.IsJSONObject(raw) {
+			s.metrics.eventsInvalid.Add(1)
+			continue
+		}
+
+		if s.cfg.dedupeEnabled {
+			eventID, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
+			if ok && s.isDuplicate(eventID) {
+				accepted++
+				s.metrics.eventsAccepted.Add(1)
+				s.metrics.eventsDeduped.Add(1)
+				continue
+			}
+		}
+
+		if s.cfg.reliabilityMode == "spool" {
+			if err := s.appendSpool(raw); err != nil {
+				if isDiskFullErr(err) {
+					s.diskHealthy.Store(false)
+				}
+				logJSON("error", "collector_spool_write_failed", map[string]any{"error": err.Error()})
+				continue
+			}
+			s.enqueueDelivery(raw)
+		} else {
+			if err := s.ensureProcessor(); err != nil {
+				s.sinkHealthy.Store(false)
+				logJSON("error", "collector_pipeline_not_initialized", map[string]any{"error": err.Error()})
+				continue
+			}
+			result := s.processor.Process(ctx, raw)
+			if failures := result.Outcome.FailureCount(); failures > 0 {
+				s.metrics.sinkWriteErrors.Add(int64(failures))
+			}
+			if result.Err != nil {
+				s.sinkHealthy.Store(false)
+				logJSON("error", "collector_sink_write_failed", map[string]any{"error": result.Err.Error()})
+				continue
+			}
+			s.sinkHealthy.Store(true)
+		}
+
+		accepted++
+		s.metrics.eventsAccepted.Add(1)
+	}
+
+	return accepted, nil
 }

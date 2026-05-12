@@ -33,6 +33,54 @@ type CollectorConfig struct {
 	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
 	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
 	MaxEventsPerReq   int           `yaml:"max_events_per_request"`
+	Server            ServerConfig  `yaml:"server"`
+}
+
+type ServerConfig struct {
+	HTTP     HTTPConfig     `yaml:"http"`
+	GRPC     GRPCConfig     `yaml:"grpc"`
+	GraphQL  GraphQLConfig `yaml:"graphql"`
+}
+
+type HTTPConfig struct {
+	Enabled            bool          `yaml:"enabled"`
+	Addr              string        `yaml:"addr"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
+	MaxHeaderBytes    int64         `yaml:"max_header_bytes"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+}
+
+type GRPCConfig struct {
+	Enabled          bool          `yaml:"enabled"`
+	Port            string        `yaml:"port"`
+	MaxConnections  int           `yaml:"max_connections"`
+	MaxConcurrentStreams int      `yaml:"max_concurrent_streams"`
+	MaxRecvMsgSize int           `yaml:"max_recv_msg_size"`
+	MaxSendMsgSize int           `yaml:"max_send_msg_size"`
+	Keepalive       KeepaliveConfig `yaml:"keepalive"`
+	TLS             TLSConfig     `yaml:"tls"`
+}
+
+type KeepaliveConfig struct {
+	MaxConnectionAge    time.Duration `yaml:"max_connection_age"`
+	MaxConnectionAgeGrace time.Duration `yaml:"max_connection_age_grace"`
+	Time                time.Duration `yaml:"time"`
+	Timeout             time.Duration `yaml:"timeout"`
+}
+
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+type GraphQLConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	Port       string `yaml:"port"`
+	Playground bool  `yaml:"playground"`
+	DepthLimit int   `yaml:"depth_limit"`
+	BatchLimit int   `yaml:"batch_limit"`
 }
 
 type AuthConfig struct {
@@ -261,6 +309,37 @@ func Default() Config {
 			ShutdownTimeout:   10 * time.Second,
 			MaxBodyBytes:      10 * 1024 * 1024,
 			MaxEventsPerReq:   5000,
+			Server: ServerConfig{
+				HTTP: HTTPConfig{
+					Enabled:            true,
+					Addr:               ":9090",
+					ReadHeaderTimeout:  5 * time.Second,
+					MaxBodyBytes:       10 * 1024 * 1024,
+					MaxHeaderBytes:    1 << 20,
+					IdleTimeout:       90 * time.Second,
+				},
+				GRPC: GRPCConfig{
+					Enabled:             false,
+					Port:                ":9091",
+					MaxConnections:     1000,
+					MaxConcurrentStreams: 100,
+					MaxRecvMsgSize:      4 << 20,
+					MaxSendMsgSize:      4 << 20,
+					Keepalive: KeepaliveConfig{
+						MaxConnectionAge:     5 * time.Minute,
+						MaxConnectionAgeGrace: 30 * time.Second,
+						Time:                  2 * time.Minute,
+						Timeout:               20 * time.Second,
+					},
+				},
+				GraphQL: GraphQLConfig{
+					Enabled:    false,
+					Port:       ":9092",
+					Playground: true,
+					DepthLimit: 10,
+					BatchLimit: 10,
+				},
+			},
 		},
 		Auth: AuthConfig{
 			Enabled:  false,

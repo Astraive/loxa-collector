@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/rand"
 	"net/http"
 	"os"
@@ -10,9 +11,16 @@ import (
 
 	collectorconfig "github.com/astraive/loxa-collector/internal/config"
 	processing "github.com/astraive/loxa-collector/internal/processing"
+	serverconfig "github.com/astraive/loxa-collector/internal/server"
 	"github.com/astraive/loxa-go"
 	"golang.org/x/time/rate"
 )
+
+type serverConfig struct {
+	HTTP    serverconfig.HTTPConfig
+	GRPC    serverconfig.GRPCConfig
+	GraphQL serverconfig.GraphQLConfig
+}
 
 type collectorConfig struct {
 	readHeaderTimeout       time.Duration
@@ -20,6 +28,7 @@ type collectorConfig struct {
 	shutdownTimeout         time.Duration
 	maxBodyBytes            int64
 	maxEventsPerRequest     int
+	serverConfig            serverConfig
 	authEnabled             bool
 	apiKeyHeader            string
 	apiKey                  string
@@ -141,4 +150,25 @@ type collectorState struct {
 	dedupeSeenAt   map[string]time.Time
 	processorMu    sync.Mutex
 	processor      *processing.Processor
+}
+
+func (s *collectorState) GetMetrics() serverconfig.Metrics {
+	return serverconfig.Metrics{
+		RequestsTotal:   s.metrics.requestsTotal.Load(),
+		RequestsAuthErr: s.metrics.requestsAuthErr.Load(),
+		RequestsLimited: s.metrics.requestsLimited.Load(),
+		EventsAccepted:  s.metrics.eventsAccepted.Load(),
+		EventsInvalid:  s.metrics.eventsInvalid.Load(),
+		EventsRejected: s.metrics.eventsRejected.Load(),
+		EventsDeduped:  s.metrics.eventsDeduped.Load(),
+	}
+}
+
+func (s *collectorState) IsHealthy() bool {
+	return s.sinkHealthy.Load() && s.diskHealthy.Load()
+}
+
+func (s *collectorState) Ingest(ctx context.Context, events [][]byte) (int, error) {
+	// Delegate to the existing handler logic via handleIngestBatch
+	return s.handleIngestBatch(ctx, events)
 }
