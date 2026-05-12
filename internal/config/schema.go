@@ -86,8 +86,13 @@ type DuckDBExport struct {
 }
 
 type KafkaConfig struct {
-	Brokers []string `yaml:"brokers"`
-	Topic   string   `yaml:"topic"`
+	Brokers            []string      `yaml:"brokers"`
+	Topic              string        `yaml:"topic"`
+	Acks               string        `yaml:"acks"`                // 0, 1, all (default: all)
+	RequestTimeout     time.Duration `yaml:"request_timeout"`    // per-request timeout
+	EnableIdempotence  bool          `yaml:"enable_idempotence"` // exactly-once semantics
+	MaxRetries         int           `yaml:"max_retries"`         // producer retry count
+	RetryBackoff       time.Duration `yaml:"retry_backoff"`      // backoff between retries
 }
 
 type WorkerConfig struct {
@@ -105,12 +110,18 @@ type MetricsConfig struct {
 }
 
 type ReliabilityConfig struct {
-	Mode              string `yaml:"mode"`
-	SpoolDir          string `yaml:"spool_dir"`
-	SpoolFile         string `yaml:"spool_file"`
-	MaxSpoolBytes     int64  `yaml:"max_spool_bytes"`
-	Fsync             bool   `yaml:"fsync"`
-	DeliveryQueueSize int    `yaml:"delivery_queue_size"`
+	Mode              string        `yaml:"mode"`
+	SpoolDir          string        `yaml:"spool_dir"`
+	SpoolFile         string        `yaml:"spool_file"`
+	MaxSpoolBytes     int64         `yaml:"max_spool_bytes"`
+	Fsync             bool          `yaml:"fsync"`
+	DeliveryQueueSize int           `yaml:"delivery_queue_size"`
+	QueueDir          string        `yaml:"queue_dir"`           // local queue directory
+	QueueBatchSize    int           `yaml:"queue_batch_size"`   // events per batch
+	QueueBatchTimeout time.Duration  `yaml:"queue_batch_timeout"` // batch timeout
+	QueueFlushInterval time.Duration `yaml:"queue_flush_interval"` // flush interval
+	QueueCircuitThreshold int      `yaml:"queue_circuit_threshold"` // failures before circuit opens
+	QueueCircuitTimeout time.Duration `yaml:"queue_circuit_timeout"` // circuit reset timeout
 }
 
 type RetryConfig struct {

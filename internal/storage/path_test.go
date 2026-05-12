@@ -1,4 +1,4 @@
-package storagepath
+package storage
 
 import (
 	"path/filepath"

@@ -40,6 +40,8 @@ type Config struct {
 	DedupeWindow            time.Duration
 	ValidateJSONObjects     bool
 	OnDiskFull              func()
+	OnDLQWrite              func(n int64)   // Called when DLQ write succeeds
+	OnDLQWriteFail          func(n int64)   // Called when DLQ write fails after retries
 	Schema                  SchemaConfig
 }
 
@@ -301,11 +303,24 @@ func (p *Processor) writeQuarantine(raw []byte, err error) {
 	}
 	b, mErr := json.Marshal(record)
 	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "[FATAL] quarantine marshal failed: %v, raw event lost: %s\n", mErr, string(raw))
 		return
 	}
 	p.quarantineMu.Lock()
 	defer p.quarantineMu.Unlock()
-	_, _ = p.quarantineFile.Write(append(b, '\n'))
+	
+	const maxRetries = 3
+	var lastWriteErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, writeErr := p.quarantineFile.Write(append(b, '\n'))
+		if writeErr == nil {
+			return
+		}
+		lastWriteErr = writeErr
+		time.Sleep(10 * time.Millisecond * time.Duration(attempt+1))
+	}
+	
+	fmt.Fprintf(os.Stderr, "[FATAL] quarantine write failed after %d attempts: %v, event: %s\n", maxRetries, lastWriteErr, string(raw))
 }
 
 func (p *Processor) normalizedDeliveryPolicy() string {
@@ -470,11 +485,33 @@ func (p *Processor) writeDLQ(raw []byte, err error) {
 	}
 	b, mErr := json.Marshal(record)
 	if mErr != nil {
+		fmt.Fprintf(os.Stderr, "[FATAL] DLQ marshal failed: %v, raw event lost: %s\n", mErr, string(raw))
 		return
 	}
 	p.dlqMu.Lock()
 	defer p.dlqMu.Unlock()
-	_, _ = p.dlqFile.Write(append(b, '\n'))
+	
+	// Retry logic for DLQ writes
+	const maxRetries = 3
+	var lastWriteErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, writeErr := p.dlqFile.Write(append(b, '\n'))
+		if writeErr == nil {
+			if p.cfg.OnDLQWrite != nil {
+				p.cfg.OnDLQWrite(1)
+			}
+			return
+		}
+		lastWriteErr = writeErr
+		// Brief backoff before retry
+		time.Sleep(10 * time.Millisecond * time.Duration(attempt+1))
+	}
+	
+	// All retries failed - this is a critical failure
+	fmt.Fprintf(os.Stderr, "[FATAL] DLQ write failed after %d attempts: %v, event: %s\n", maxRetries, lastWriteErr, string(raw))
+	if p.cfg.OnDLQWriteFail != nil {
+		p.cfg.OnDLQWriteFail(1)
+	}
 }
 
 func (p *Processor) isDuplicate(value string) bool {

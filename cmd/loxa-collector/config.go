@@ -300,6 +300,22 @@ func applyEnvOverrides(fc *fileConfig) error {
 	if err := setInt("COLLECTOR_DELIVERY_QUEUE_SIZE", &fc.Reliability.DeliveryQueueSize); err != nil {
 		return err
 	}
+	setString("COLLECTOR_QUEUE_DIR", &fc.Reliability.QueueDir)
+	if err := setInt("COLLECTOR_QUEUE_BATCH_SIZE", &fc.Reliability.QueueBatchSize); err != nil {
+		return err
+	}
+	if err := setDuration("COLLECTOR_QUEUE_BATCH_TIMEOUT", &fc.Reliability.QueueBatchTimeout); err != nil {
+		return err
+	}
+	if err := setDuration("COLLECTOR_QUEUE_FLUSH_INTERVAL", &fc.Reliability.QueueFlushInterval); err != nil {
+		return err
+	}
+	if err := setInt("COLLECTOR_QUEUE_CIRCUIT_THRESHOLD", &fc.Reliability.QueueCircuitThreshold); err != nil {
+		return err
+	}
+	if err := setDuration("COLLECTOR_QUEUE_CIRCUIT_TIMEOUT", &fc.Reliability.QueueCircuitTimeout); err != nil {
+		return err
+	}
 	if err := setBool("COLLECTOR_RETRY_ENABLED", &fc.Retry.Enabled); err != nil {
 		return err
 	}
@@ -414,13 +430,18 @@ func validateFileConfig(fc fileConfig) error {
 		}
 	}
 	if mode == "queue" {
-		if len(fc.Kafka.Brokers) == 0 {
-			return errors.New("kafka.brokers must include at least one broker in queue mode")
+		if len(fc.Kafka.Brokers) == 0 && strings.TrimSpace(fc.Reliability.QueueDir) == "" {
+			return errors.New("either kafka.brokers or reliability.queue_dir must be configured in queue mode")
 		}
-		for i, broker := range fc.Kafka.Brokers {
-			if strings.TrimSpace(broker) == "" {
-				return fmt.Errorf("kafka.brokers[%d] must not be empty", i)
+		if len(fc.Kafka.Brokers) > 0 {
+			for i, broker := range fc.Kafka.Brokers {
+				if strings.TrimSpace(broker) == "" {
+					return fmt.Errorf("kafka.brokers[%d] must not be empty", i)
+				}
 			}
+		}
+		if strings.TrimSpace(fc.Reliability.QueueDir) != "" && fc.Reliability.QueueBatchSize <= 0 {
+			fc.Reliability.QueueBatchSize = 100
 		}
 		if strings.TrimSpace(fc.Kafka.Topic) == "" {
 			return errors.New("kafka.topic must not be empty in queue mode")
@@ -641,6 +662,12 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		maxSpoolBytes:           fc.Reliability.MaxSpoolBytes,
 		spoolFsync:              fc.Reliability.Fsync,
 		deliveryQueueSize:       fc.Reliability.DeliveryQueueSize,
+		queueDir:                fc.Reliability.QueueDir,
+		queueBatchSize:          fc.Reliability.QueueBatchSize,
+		queueBatchTimeout:       fc.Reliability.QueueBatchTimeout,
+		queueFlushInterval:     fc.Reliability.QueueFlushInterval,
+		queueCircuitThreshold:   fc.Reliability.QueueCircuitThreshold,
+		queueCircuitTimeout:     fc.Reliability.QueueCircuitTimeout,
 		retryEnabled:            fc.Retry.Enabled,
 		retryMaxAttempts:        fc.Retry.MaxAttempts,
 		retryInitialBackoff:     fc.Retry.InitialBackoff,
@@ -664,6 +691,11 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		dedupeBackend:           strings.ToLower(fc.Dedupe.Backend),
 		kafkaBrokers:            append([]string(nil), fc.Kafka.Brokers...),
 		kafkaTopic:              strings.TrimSpace(fc.Kafka.Topic),
+		kafkaAcks:               strings.ToLower(strings.TrimSpace(fc.Kafka.Acks)),
+		kafkaRequestTimeout:     fc.Kafka.RequestTimeout,
+		kafkaIdempotence:       fc.Kafka.EnableIdempotence,
+		kafkaMaxRetries:        fc.Kafka.MaxRetries,
+		kafkaRetryBackoff:      fc.Kafka.RetryBackoff,
 		workerConsumerGroup:     strings.TrimSpace(fc.Worker.ConsumerGroup),
 		workerPollTimeout:       fc.Worker.PollTimeout,
 		schemaMode:              strings.ToLower(strings.TrimSpace(fc.Schema.Mode)),
