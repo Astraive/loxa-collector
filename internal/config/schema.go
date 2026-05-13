@@ -9,22 +9,26 @@ import (
 )
 
 type Config struct {
-	Collector   CollectorConfig        `yaml:"collector"`
-	Auth        AuthConfig             `yaml:"auth"`
-	RateLimit   RateLimitConfig        `yaml:"rate_limit"`
-	Routes      RoutesConfig           `yaml:"routes"`
-	Storage     StorageConfig          `yaml:"storage"`
-	DuckDB      DuckDBConfig           `yaml:"duckdb"`
-	Kafka       KafkaConfig            `yaml:"kafka"`
-	Worker      WorkerConfig           `yaml:"worker"`
-	Logging     LoggingConfig          `yaml:"logging"`
-	Metrics     MetricsConfig          `yaml:"metrics"`
-	Reliability ReliabilityConfig      `yaml:"reliability"`
-	Retry       RetryConfig            `yaml:"retry"`
-	DeadLetter  DeadLetterConfig       `yaml:"dead_letter"`
-	Fanout      FanoutConfig           `yaml:"fanout"`
-	Dedupe      DedupeConfig           `yaml:"dedupe"`
-	Schema      SchemaGovernanceConfig `yaml:"schema_governance"`
+	Collector   CollectorConfig         `yaml:"collector"`
+	Auth        AuthConfig              `yaml:"auth"`
+	RateLimit   RateLimitConfig         `yaml:"rate_limit"`
+	Routes      RoutesConfig            `yaml:"routes"`
+	Storage     StorageConfig           `yaml:"storage"`
+	DuckDB      DuckDBConfig            `yaml:"duckdb"`
+	Kafka       KafkaConfig             `yaml:"kafka"`
+	Worker      WorkerConfig            `yaml:"worker"`
+	Logging     LoggingConfig           `yaml:"logging"`
+	Metrics     MetricsConfig           `yaml:"metrics"`
+	Reliability ReliabilityConfig       `yaml:"reliability"`
+	Limits      LimitsConfig            `yaml:"limits"`
+	Identity    IdentityConfig          `yaml:"identity"`
+	Privacy     PrivacyConfig           `yaml:"privacy"`
+	Components  ComponentRegistryConfig `yaml:"components"`
+	Retry       RetryConfig             `yaml:"retry"`
+	DeadLetter  DeadLetterConfig        `yaml:"dead_letter"`
+	Fanout      FanoutConfig            `yaml:"fanout"`
+	Dedupe      DedupeConfig            `yaml:"dedupe"`
+	Schema      SchemaGovernanceConfig  `yaml:"schema_governance"`
 }
 
 type CollectorConfig struct {
@@ -37,13 +41,13 @@ type CollectorConfig struct {
 }
 
 type ServerConfig struct {
-	HTTP     HTTPConfig     `yaml:"http"`
-	GRPC     GRPCConfig     `yaml:"grpc"`
-	GraphQL  GraphQLConfig `yaml:"graphql"`
+	HTTP    HTTPConfig    `yaml:"http"`
+	GRPC    GRPCConfig    `yaml:"grpc"`
+	GraphQL GraphQLConfig `yaml:"graphql"`
 }
 
 type HTTPConfig struct {
-	Enabled            bool          `yaml:"enabled"`
+	Enabled           bool          `yaml:"enabled"`
 	Addr              string        `yaml:"addr"`
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
@@ -52,21 +56,21 @@ type HTTPConfig struct {
 }
 
 type GRPCConfig struct {
-	Enabled          bool          `yaml:"enabled"`
-	Port            string        `yaml:"port"`
-	MaxConnections  int           `yaml:"max_connections"`
-	MaxConcurrentStreams int      `yaml:"max_concurrent_streams"`
-	MaxRecvMsgSize int           `yaml:"max_recv_msg_size"`
-	MaxSendMsgSize int           `yaml:"max_send_msg_size"`
-	Keepalive       KeepaliveConfig `yaml:"keepalive"`
-	TLS             TLSConfig     `yaml:"tls"`
+	Enabled              bool            `yaml:"enabled"`
+	Port                 string          `yaml:"port"`
+	MaxConnections       int             `yaml:"max_connections"`
+	MaxConcurrentStreams int             `yaml:"max_concurrent_streams"`
+	MaxRecvMsgSize       int             `yaml:"max_recv_msg_size"`
+	MaxSendMsgSize       int             `yaml:"max_send_msg_size"`
+	Keepalive            KeepaliveConfig `yaml:"keepalive"`
+	TLS                  TLSConfig       `yaml:"tls"`
 }
 
 type KeepaliveConfig struct {
-	MaxConnectionAge    time.Duration `yaml:"max_connection_age"`
+	MaxConnectionAge      time.Duration `yaml:"max_connection_age"`
 	MaxConnectionAgeGrace time.Duration `yaml:"max_connection_age_grace"`
-	Time                time.Duration `yaml:"time"`
-	Timeout             time.Duration `yaml:"timeout"`
+	Time                  time.Duration `yaml:"time"`
+	Timeout               time.Duration `yaml:"timeout"`
 }
 
 type TLSConfig struct {
@@ -78,9 +82,9 @@ type TLSConfig struct {
 type GraphQLConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 	Port       string `yaml:"port"`
-	Playground bool  `yaml:"playground"`
-	DepthLimit int   `yaml:"depth_limit"`
-	BatchLimit int   `yaml:"batch_limit"`
+	Playground bool   `yaml:"playground"`
+	DepthLimit int    `yaml:"depth_limit"`
+	BatchLimit int    `yaml:"batch_limit"`
 }
 
 type AuthConfig struct {
@@ -134,13 +138,13 @@ type DuckDBExport struct {
 }
 
 type KafkaConfig struct {
-	Brokers            []string      `yaml:"brokers"`
-	Topic              string        `yaml:"topic"`
-	Acks               string        `yaml:"acks"`                // 0, 1, all (default: all)
-	RequestTimeout     time.Duration `yaml:"request_timeout"`    // per-request timeout
-	EnableIdempotence  bool          `yaml:"enable_idempotence"` // exactly-once semantics
-	MaxRetries         int           `yaml:"max_retries"`         // producer retry count
-	RetryBackoff       time.Duration `yaml:"retry_backoff"`      // backoff between retries
+	Brokers           []string      `yaml:"brokers"`
+	Topic             string        `yaml:"topic"`
+	Acks              string        `yaml:"acks"`               // 0, 1, all (default: all)
+	RequestTimeout    time.Duration `yaml:"request_timeout"`    // per-request timeout
+	EnableIdempotence bool          `yaml:"enable_idempotence"` // exactly-once semantics
+	MaxRetries        int           `yaml:"max_retries"`        // producer retry count
+	RetryBackoff      time.Duration `yaml:"retry_backoff"`      // backoff between retries
 }
 
 type WorkerConfig struct {
@@ -158,18 +162,58 @@ type MetricsConfig struct {
 }
 
 type ReliabilityConfig struct {
-	Mode              string        `yaml:"mode"`
-	SpoolDir          string        `yaml:"spool_dir"`
-	SpoolFile         string        `yaml:"spool_file"`
-	MaxSpoolBytes     int64         `yaml:"max_spool_bytes"`
-	Fsync             bool          `yaml:"fsync"`
-	DeliveryQueueSize int           `yaml:"delivery_queue_size"`
-	QueueDir          string        `yaml:"queue_dir"`           // local queue directory
-	QueueBatchSize    int           `yaml:"queue_batch_size"`   // events per batch
-	QueueBatchTimeout time.Duration  `yaml:"queue_batch_timeout"` // batch timeout
-	QueueFlushInterval time.Duration `yaml:"queue_flush_interval"` // flush interval
-	QueueCircuitThreshold int      `yaml:"queue_circuit_threshold"` // failures before circuit opens
-	QueueCircuitTimeout time.Duration `yaml:"queue_circuit_timeout"` // circuit reset timeout
+	Mode                  string        `yaml:"mode"`
+	SpoolDir              string        `yaml:"spool_dir"`
+	SpoolFile             string        `yaml:"spool_file"`
+	MaxSpoolBytes         int64         `yaml:"max_spool_bytes"`
+	Fsync                 bool          `yaml:"fsync"`
+	DeliveryQueueSize     int           `yaml:"delivery_queue_size"`
+	QueueDir              string        `yaml:"queue_dir"`               // local queue directory
+	QueueBatchSize        int           `yaml:"queue_batch_size"`        // events per batch
+	QueueBatchTimeout     time.Duration `yaml:"queue_batch_timeout"`     // batch timeout
+	QueueFlushInterval    time.Duration `yaml:"queue_flush_interval"`    // flush interval
+	QueueCircuitThreshold int           `yaml:"queue_circuit_threshold"` // failures before circuit opens
+	QueueCircuitTimeout   time.Duration `yaml:"queue_circuit_timeout"`   // circuit reset timeout
+}
+
+type LimitsConfig struct {
+	MaxInflightRequests int   `yaml:"max_inflight_requests"`
+	MaxInflightEvents   int   `yaml:"max_inflight_events"`
+	MaxQueueBytes       int64 `yaml:"max_queue_bytes"`
+	MaxEventBytes       int64 `yaml:"max_event_bytes"`
+	MaxAttrCount        int   `yaml:"max_attr_count"`
+	MaxAttrDepth        int   `yaml:"max_attr_depth"`
+	MaxStringLength     int   `yaml:"max_string_length"`
+}
+
+type IdentityConfig struct {
+	Mode                  string `yaml:"mode"`
+	AuthIdentityWins      bool   `yaml:"auth_identity_wins"`
+	AllowPayloadIdentity  bool   `yaml:"allow_payload_identity"`
+	ServiceName           string `yaml:"service_name"`
+	ServiceVersion        string `yaml:"service_version"`
+	DeploymentEnvironment string `yaml:"deployment_environment"`
+	DeploymentRegion      string `yaml:"deployment_region"`
+	TenantID              string `yaml:"tenant_id"`
+	WorkspaceID           string `yaml:"workspace_id"`
+	OrganizationID        string `yaml:"organization_id"`
+}
+
+type PrivacyConfig struct {
+	Mode                 string   `yaml:"mode"`
+	CollectorRedaction   bool     `yaml:"collector_redaction"`
+	EmergencyRedaction   bool     `yaml:"emergency_redaction"`
+	Allowlist            []string `yaml:"allowlist"`
+	Blocklist            []string `yaml:"blocklist"`
+	SecretScan           bool     `yaml:"secret_scan"`
+	RightToDeleteEnabled bool     `yaml:"right_to_delete_enabled"`
+}
+
+type ComponentRegistryConfig struct {
+	Receivers  []string `yaml:"receivers"`
+	Processors []string `yaml:"processors"`
+	Exporters  []string `yaml:"exporters"`
+	Extensions []string `yaml:"extensions"`
 }
 
 type RetryConfig struct {
@@ -311,22 +355,22 @@ func Default() Config {
 			MaxEventsPerReq:   5000,
 			Server: ServerConfig{
 				HTTP: HTTPConfig{
-					Enabled:            true,
-					Addr:               ":9090",
-					ReadHeaderTimeout:  5 * time.Second,
-					MaxBodyBytes:       10 * 1024 * 1024,
+					Enabled:           true,
+					Addr:              ":9090",
+					ReadHeaderTimeout: 5 * time.Second,
+					MaxBodyBytes:      10 * 1024 * 1024,
 					MaxHeaderBytes:    1 << 20,
 					IdleTimeout:       90 * time.Second,
 				},
 				GRPC: GRPCConfig{
-					Enabled:             false,
-					Port:                ":9091",
-					MaxConnections:     1000,
+					Enabled:              false,
+					Port:                 ":9091",
+					MaxConnections:       1000,
 					MaxConcurrentStreams: 100,
-					MaxRecvMsgSize:      4 << 20,
-					MaxSendMsgSize:      4 << 20,
+					MaxRecvMsgSize:       4 << 20,
+					MaxSendMsgSize:       4 << 20,
 					Keepalive: KeepaliveConfig{
-						MaxConnectionAge:     5 * time.Minute,
+						MaxConnectionAge:      5 * time.Minute,
 						MaxConnectionAgeGrace: 30 * time.Second,
 						Time:                  2 * time.Minute,
 						Timeout:               20 * time.Second,
@@ -417,6 +461,47 @@ func Default() Config {
 			MaxSpoolBytes:     10 * 1024 * 1024 * 1024,
 			Fsync:             true,
 			DeliveryQueueSize: 4096,
+		},
+		Limits: LimitsConfig{
+			MaxInflightRequests: 1024,
+			MaxInflightEvents:   100000,
+			MaxQueueBytes:       256 * 1024 * 1024,
+			MaxEventBytes:       256 * 1024,
+			MaxAttrCount:        512,
+			MaxAttrDepth:        16,
+			MaxStringLength:     16 * 1024,
+		},
+		Identity: IdentityConfig{
+			Mode:                 "payload",
+			AuthIdentityWins:     true,
+			AllowPayloadIdentity: true,
+		},
+		Privacy: PrivacyConfig{
+			Mode:               "warn",
+			CollectorRedaction: true,
+			EmergencyRedaction: false,
+			Blocklist: []string{
+				"password",
+				"passwd",
+				"secret",
+				"token",
+				"api_key",
+				"apikey",
+				"authorization",
+				"cookie",
+				"set-cookie",
+				"private_key",
+				"access_token",
+				"refresh_token",
+				"session",
+			},
+			SecretScan: true,
+		},
+		Components: ComponentRegistryConfig{
+			Receivers:  []string{"loxa_http", "loxa_ndjson"},
+			Processors: []string{"validate", "redact", "dedupe", "memory_limiter", "cardinality_limit"},
+			Exporters:  []string{"duckdb"},
+			Extensions: []string{"health", "ready", "metrics"},
 		},
 		Retry: RetryConfig{
 			Enabled:        true,

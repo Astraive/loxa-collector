@@ -13,6 +13,12 @@ import (
 )
 
 type RequestEnvelope struct {
+	APIVersion string `json:"api_version"`
+	Source     struct {
+		SDK     string `json:"sdk"`
+		Version string `json:"version"`
+		Service string `json:"service"`
+	} `json:"source"`
 	Events []json.RawMessage `json:"events"`
 }
 

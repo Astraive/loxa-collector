@@ -301,6 +301,27 @@ func applyEnvOverrides(fc *fileConfig) error {
 	if err := setInt("COLLECTOR_DELIVERY_QUEUE_SIZE", &fc.Reliability.DeliveryQueueSize); err != nil {
 		return err
 	}
+	if err := setInt("COLLECTOR_MAX_INFLIGHT_REQUESTS", &fc.Limits.MaxInflightRequests); err != nil {
+		return err
+	}
+	if err := setInt("COLLECTOR_MAX_INFLIGHT_EVENTS", &fc.Limits.MaxInflightEvents); err != nil {
+		return err
+	}
+	if err := setInt64("COLLECTOR_MAX_QUEUE_BYTES", &fc.Limits.MaxQueueBytes); err != nil {
+		return err
+	}
+	if err := setInt64("COLLECTOR_MAX_EVENT_BYTES", &fc.Limits.MaxEventBytes); err != nil {
+		return err
+	}
+	if err := setInt("COLLECTOR_MAX_ATTR_COUNT", &fc.Limits.MaxAttrCount); err != nil {
+		return err
+	}
+	if err := setInt("COLLECTOR_MAX_ATTR_DEPTH", &fc.Limits.MaxAttrDepth); err != nil {
+		return err
+	}
+	if err := setInt("COLLECTOR_MAX_STRING_LENGTH", &fc.Limits.MaxStringLength); err != nil {
+		return err
+	}
 	setString("COLLECTOR_QUEUE_DIR", &fc.Reliability.QueueDir)
 	if err := setInt("COLLECTOR_QUEUE_BATCH_SIZE", &fc.Reliability.QueueBatchSize); err != nil {
 		return err
@@ -369,6 +390,30 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return err
 	}
 	setStringLower("COLLECTOR_DEDUPE_BACKEND", &fc.Dedupe.Backend)
+	setStringLower("COLLECTOR_IDENTITY_MODE", &fc.Identity.Mode)
+	if err := setBool("COLLECTOR_AUTH_IDENTITY_WINS", &fc.Identity.AuthIdentityWins); err != nil {
+		return err
+	}
+	if err := setBool("COLLECTOR_ALLOW_PAYLOAD_IDENTITY", &fc.Identity.AllowPayloadIdentity); err != nil {
+		return err
+	}
+	setString("COLLECTOR_SERVICE_NAME", &fc.Identity.ServiceName)
+	setString("COLLECTOR_SERVICE_VERSION", &fc.Identity.ServiceVersion)
+	setString("COLLECTOR_DEPLOYMENT_ENVIRONMENT", &fc.Identity.DeploymentEnvironment)
+	setString("COLLECTOR_DEPLOYMENT_REGION", &fc.Identity.DeploymentRegion)
+	setString("COLLECTOR_TENANT_ID", &fc.Identity.TenantID)
+	setString("COLLECTOR_WORKSPACE_ID", &fc.Identity.WorkspaceID)
+	setString("COLLECTOR_ORGANIZATION_ID", &fc.Identity.OrganizationID)
+	setStringLower("COLLECTOR_PRIVACY_MODE", &fc.Privacy.Mode)
+	if err := setBool("COLLECTOR_REDACTION_ENABLED", &fc.Privacy.CollectorRedaction); err != nil {
+		return err
+	}
+	if err := setBool("COLLECTOR_EMERGENCY_REDACTION", &fc.Privacy.EmergencyRedaction); err != nil {
+		return err
+	}
+	if err := setBool("COLLECTOR_SECRET_SCAN", &fc.Privacy.SecretScan); err != nil {
+		return err
+	}
 
 	if fc.Auth.Value == "" && fc.Auth.ValueEnv != "" {
 		fc.Auth.Value = strings.TrimSpace(os.Getenv(fc.Auth.ValueEnv))
@@ -429,6 +474,40 @@ func validateFileConfig(fc fileConfig) error {
 		if fc.Reliability.DeliveryQueueSize <= 0 {
 			return errors.New("reliability.delivery_queue_size must be > 0 in spool mode")
 		}
+	}
+	if fc.Limits.MaxInflightRequests < 0 {
+		return errors.New("limits.max_inflight_requests must be >= 0")
+	}
+	if fc.Limits.MaxInflightEvents < 0 {
+		return errors.New("limits.max_inflight_events must be >= 0")
+	}
+	if fc.Limits.MaxQueueBytes < 0 {
+		return errors.New("limits.max_queue_bytes must be >= 0")
+	}
+	if fc.Limits.MaxEventBytes < 0 {
+		return errors.New("limits.max_event_bytes must be >= 0")
+	}
+	if fc.Limits.MaxAttrCount < 0 {
+		return errors.New("limits.max_attr_count must be >= 0")
+	}
+	if fc.Limits.MaxAttrDepth < 0 {
+		return errors.New("limits.max_attr_depth must be >= 0")
+	}
+	if fc.Limits.MaxStringLength < 0 {
+		return errors.New("limits.max_string_length must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(fc.Identity.Mode)) {
+	case "", "payload", "api_key", "jwt", "mtls":
+	default:
+		return errors.New("identity.mode must be payload, api_key, jwt, or mtls")
+	}
+	switch strings.ToLower(strings.TrimSpace(fc.Privacy.Mode)) {
+	case "", "off", "warn", "enforce":
+	default:
+		return errors.New("privacy.mode must be off, warn, or enforce")
+	}
+	if err := validateComponentRegistry(fc.Components); err != nil {
+		return err
 	}
 	if mode == "queue" {
 		if len(fc.Kafka.Brokers) == 0 {
@@ -612,6 +691,36 @@ func validateFileConfig(fc fileConfig) error {
 	return nil
 }
 
+func validateComponentRegistry(reg collectorconfig.ComponentRegistryConfig) error {
+	check := func(kind string, values []string) error {
+		seen := map[string]struct{}{}
+		for i, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return fmt.Errorf("components.%s[%d] must not be empty", kind, i)
+			}
+			if _, ok := seen[value]; ok {
+				return fmt.Errorf("components.%s contains duplicate component %q", kind, value)
+			}
+			seen[value] = struct{}{}
+		}
+		return nil
+	}
+	if err := check("receivers", reg.Receivers); err != nil {
+		return err
+	}
+	if err := check("processors", reg.Processors); err != nil {
+		return err
+	}
+	if err := check("exporters", reg.Exporters); err != nil {
+		return err
+	}
+	if err := check("extensions", reg.Extensions); err != nil {
+		return err
+	}
+	return nil
+}
+
 func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 	return collectorConfig{
 		addr:                fc.Collector.Addr,
@@ -701,6 +810,34 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		maxSpoolBytes:           fc.Reliability.MaxSpoolBytes,
 		spoolFsync:              fc.Reliability.Fsync,
 		deliveryQueueSize:       fc.Reliability.DeliveryQueueSize,
+		maxInflightRequests:     fc.Limits.MaxInflightRequests,
+		maxInflightEvents:       fc.Limits.MaxInflightEvents,
+		maxQueueBytes:           fc.Limits.MaxQueueBytes,
+		maxEventBytes:           fc.Limits.MaxEventBytes,
+		maxAttrCount:            fc.Limits.MaxAttrCount,
+		maxAttrDepth:            fc.Limits.MaxAttrDepth,
+		maxStringLength:         fc.Limits.MaxStringLength,
+		identityMode:            strings.ToLower(strings.TrimSpace(fc.Identity.Mode)),
+		authIdentityWins:        fc.Identity.AuthIdentityWins,
+		allowPayloadIdentity:    fc.Identity.AllowPayloadIdentity,
+		boundServiceName:        strings.TrimSpace(fc.Identity.ServiceName),
+		boundServiceVersion:     strings.TrimSpace(fc.Identity.ServiceVersion),
+		boundEnvironment:        strings.TrimSpace(fc.Identity.DeploymentEnvironment),
+		boundRegion:             strings.TrimSpace(fc.Identity.DeploymentRegion),
+		boundTenantID:           strings.TrimSpace(fc.Identity.TenantID),
+		boundWorkspaceID:        strings.TrimSpace(fc.Identity.WorkspaceID),
+		boundOrganizationID:     strings.TrimSpace(fc.Identity.OrganizationID),
+		privacyMode:             strings.ToLower(strings.TrimSpace(fc.Privacy.Mode)),
+		collectorRedaction:      fc.Privacy.CollectorRedaction,
+		emergencyRedaction:      fc.Privacy.EmergencyRedaction,
+		privacyAllowlist:        append([]string(nil), fc.Privacy.Allowlist...),
+		privacyBlocklist:        append([]string(nil), fc.Privacy.Blocklist...),
+		secretScan:              fc.Privacy.SecretScan,
+		rightToDeleteEnabled:    fc.Privacy.RightToDeleteEnabled,
+		receiverRegistry:        append([]string(nil), fc.Components.Receivers...),
+		processorRegistry:       append([]string(nil), fc.Components.Processors...),
+		exporterRegistry:        append([]string(nil), fc.Components.Exporters...),
+		extensionRegistry:       append([]string(nil), fc.Components.Extensions...),
 		queueDir:                fc.Reliability.QueueDir,
 		queueBatchSize:          fc.Reliability.QueueBatchSize,
 		queueBatchTimeout:       fc.Reliability.QueueBatchTimeout,

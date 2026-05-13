@@ -51,7 +51,11 @@ func (s errSink) Flush(context.Context) error { return nil }
 func (s errSink) Close(context.Context) error { return nil }
 
 func testCollectorConfig() collectorConfig {
-	return runtimeConfigFromFile(defaultFileConfig())
+	cfg := runtimeConfigFromFile(defaultFileConfig())
+	cfg.retryMaxAttempts = 1
+	cfg.retryInitialBackoff = time.Millisecond
+	cfg.retryMaxBackoff = time.Millisecond
+	return cfg
 }
 
 func TestParseEventsJSONArray(t *testing.T) {
@@ -132,8 +136,74 @@ func TestHandleIngestPartialSuccess(t *testing.T) {
 	if out.Accepted != 1 || out.Invalid != 1 || out.Rejected != 0 {
 		t.Fatalf("unexpected response: %+v", out)
 	}
+	if len(out.Acks) != 2 {
+		t.Fatalf("expected 2 acks, got %d", len(out.Acks))
+	}
+	if out.Acks[0].Status != "accepted" || out.Acks[0].Reason != "accepted" {
+		t.Fatalf("unexpected accepted ack: %+v", out.Acks[0])
+	}
+	if out.Acks[1].Status != "invalid" || out.Acks[1].Reason != "expected_json_object" {
+		t.Fatalf("unexpected invalid ack: %+v", out.Acks[1])
+	}
 	if len(sink.events) != 1 {
 		t.Fatalf("expected 1 persisted event, got %d", len(sink.events))
+	}
+}
+
+func TestHandleIngestWrappedEnvelopeWithContractMetadata(t *testing.T) {
+	sink := &fakeSink{}
+	state := &collectorState{
+		cfg:         testCollectorConfig(),
+		ingestSink:  sink,
+		rateLimiter: rate.NewLimiter(rate.Limit(1000), 1000),
+	}
+	state.ready.Store(true)
+
+	body := `{"api_version":"v1","source":{"sdk":"loxa-go","version":"0.1.0","service":"checkout"},"events":[{"event_id":"evt-1","schema_version":"v1","event_version":"v1","event":"checkout.request","service":"checkout"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	state.handleIngest(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out ingest.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Accepted != 1 || len(out.Acks) != 1 || out.Acks[0].Status != "accepted" {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
+func TestHandleIngestRejectsUnsupportedSchemaVersion(t *testing.T) {
+	sink := &fakeSink{}
+	state := &collectorState{
+		cfg:         testCollectorConfig(),
+		ingestSink:  sink,
+		rateLimiter: rate.NewLimiter(rate.Limit(1000), 1000),
+	}
+	state.ready.Store(true)
+
+	req := httptest.NewRequest(http.MethodPost, "/ingest", strings.NewReader(`{"event_id":"evt-bad","schema_version":"v999","event_version":"v1","event":"checkout.request","service":"checkout"}`))
+	rec := httptest.NewRecorder()
+	state.handleIngest(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out ingest.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Invalid != 1 || len(out.Acks) != 1 {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+	if out.Acks[0].Status != "invalid" || out.Acks[0].Reason != "unsupported_schema_version" {
+		t.Fatalf("unexpected ack: %+v", out.Acks[0])
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("expected no sink writes, got %d", len(sink.events))
 	}
 }
 
@@ -209,8 +279,8 @@ func TestHandleIngestMaxBodyExceeded(t *testing.T) {
 	rec := httptest.NewRecorder()
 	state.handleIngest(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", rec.Code)
 	}
 }
 

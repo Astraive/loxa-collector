@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/astraive/loxa-collector/internal/ingest"
 	"github.com/astraive/loxa-collector/internal/validation"
@@ -13,11 +16,25 @@ import (
 
 func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	s.metrics.requestsTotal.Add(1)
+	requestID := newIngestRequestID()
 
 	if s.cfg.rateLimitEnabled && !s.rateLimiter.Allow() {
 		s.metrics.requestsLimited.Add(1)
 		s.metrics.eventsRejected.Add(1)
-		writeJSON(w, http.StatusTooManyRequests, ingest.Response{Rejected: 1})
+		writeJSON(w, http.StatusTooManyRequests, ingest.Response{
+			RequestID:    requestID,
+			Status:       ingest.StatusRejected,
+			Rejected:     1,
+			RetryAfterMS: s.cfg.retryAfterMS(),
+			Reason:       "rate_limited",
+			Error:        "rate_limited",
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      "rate_limited",
+				Message:   "collector rate limit exceeded",
+				Retryable: true,
+			}},
+		})
 		return
 	}
 
@@ -26,7 +43,19 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.cfg.apiKey)) != 1 {
 			s.metrics.requestsAuthErr.Add(1)
 			s.metrics.eventsRejected.Add(1)
-			writeJSON(w, http.StatusUnauthorized, ingest.Response{Rejected: 1})
+			writeJSON(w, http.StatusUnauthorized, ingest.Response{
+				RequestID: requestID,
+				Status:    ingest.StatusRejected,
+				Rejected:  1,
+				Error:     "auth_failed",
+				Reason:    "auth_failed",
+				Errors: []ingest.EventError{{
+					Index:     0,
+					Code:      "auth_failed",
+					Message:   "collector authentication failed",
+					Retryable: false,
+				}},
+			})
 			return
 		}
 	}
@@ -34,51 +63,100 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	rawEvents, err := ingest.ParseEvents(r, s.cfg.maxBodyBytes)
 	if err != nil {
 		s.metrics.eventsRejected.Add(1)
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":    "invalid request payload",
-			"rejected": 1,
+		status := http.StatusBadRequest
+		code := "invalid_request_payload"
+		if strings.Contains(strings.ToLower(err.Error()), "max body bytes") {
+			status = http.StatusRequestEntityTooLarge
+			code = "payload_too_large"
+		}
+		writeJSON(w, status, ingest.Response{
+			RequestID: requestID,
+			Status:    ingest.StatusRejected,
+			Rejected:  1,
+			Error:     code,
+			Reason:    code,
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      code,
+				Message:   err.Error(),
+				Retryable: false,
+			}},
 		})
 		return
 	}
 
 	if len(rawEvents) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":    "empty event payload",
-			"rejected": 1,
+		writeJSON(w, http.StatusBadRequest, ingest.Response{
+			RequestID: requestID,
+			Status:    ingest.StatusInvalid,
+			Rejected:  1,
+			Error:     "empty_event_payload",
+			Reason:    "empty_event_payload",
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      "empty_event_payload",
+				Message:   "empty event payload",
+				Retryable: false,
+			}},
 		})
 		return
 	}
 
 	if len(rawEvents) > s.cfg.maxEventsPerRequest {
 		s.metrics.eventsRejected.Add(int64(len(rawEvents)))
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
-			"error":    "max events exceeded",
-			"rejected": len(rawEvents),
+		writeJSON(w, http.StatusRequestEntityTooLarge, ingest.Response{
+			RequestID: requestID,
+			Status:    ingest.StatusRejected,
+			Rejected:  len(rawEvents),
+			Error:     "max_events_exceeded",
+			Reason:    "max_events_exceeded",
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      "max_events_exceeded",
+				Message:   "max events per request exceeded",
+				Retryable: false,
+			}},
 		})
 		return
 	}
 
-	var resp ingest.Response
-	for _, raw := range rawEvents {
+	resp := ingest.Response{RequestID: requestID}
+	for i, raw := range rawEvents {
 		if !validation.IsJSONObject(raw) {
-			resp.Invalid++
 			s.metrics.eventsInvalid.Add(1)
+			resp.AddInvalid(i, "", "expected_json_object", "event payload must be a JSON object")
 			continue
 		}
 
-		if s.cfg.dedupeEnabled {
-			eventID, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
-			if ok && s.isDuplicate(eventID) {
-				resp.Deduped++
-				s.metrics.eventsDeduped.Add(1)
-				continue
-			}
+		eventID, _ := validation.ExtractStringPath(raw, "event_id")
+		if reason, ok := validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
+			s.metrics.eventsInvalid.Add(1)
+			resp.AddInvalid(i, eventID, reason, reason)
+			continue
+		}
+		if prepared, gerr := s.prepareEvent(raw); gerr != nil {
+			s.metrics.eventsInvalid.Add(1)
+			resp.AddInvalid(i, eventID, gerr.Code, gerr.Message)
+			continue
+		} else {
+			raw = prepared
 		}
 
 		if s.cfg.reliabilityMode == "spool" {
+			// For spool mode, deduplicate at ingest time to avoid unnecessary spooling
+			if s.cfg.dedupeEnabled {
+				dedupeValue, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
+				if ok && s.isDuplicate(dedupeValue) {
+					s.metrics.eventsDeduped.Add(1)
+					s.metrics.eventsAccepted.Add(1)
+					resp.AddDuplicate(i, eventID)
+					continue
+				}
+			}
+
 			if err := s.appendSpool(raw); err != nil {
-				resp.Rejected++
 				s.metrics.eventsRejected.Add(1)
+				resp.AddRejected(i, eventID, "spool_write_failed", err.Error(), true)
 				if isDiskFullErr(err) {
 					s.diskHealthy.Store(false)
 				}
@@ -87,12 +165,12 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 			}
 			s.enqueueDelivery(raw)
 		} else {
-			// Direct mode - processor handles delivery with built-in retry
+			// Direct mode - processor handles delivery with deduplication
 			if err := s.ensureProcessor(); err != nil {
-				resp.Rejected++
 				s.metrics.eventsRejected.Add(1)
 				s.sinkHealthy.Store(false)
 				logJSON("error", "collector_pipeline_not_initialized", map[string]any{"error": err.Error()})
+				resp.AddRejected(i, eventID, "pipeline_not_initialized", err.Error(), true)
 				continue
 			}
 			result := s.processor.Process(r.Context(), raw)
@@ -100,18 +178,23 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 				s.metrics.sinkWriteErrors.Add(int64(failures))
 			}
 			if result.Deduped {
-				resp.Deduped++
 				s.metrics.eventsDeduped.Add(1)
+				s.metrics.eventsAccepted.Add(1)
+				resp.AddDuplicate(i, eventID)
 				continue
 			}
 			if result.Invalid {
-				resp.Invalid++
 				s.metrics.eventsInvalid.Add(1)
+				message := "schema validation failed"
+				if result.Err != nil {
+					message = result.Err.Error()
+				}
+				resp.AddInvalid(i, eventID, "schema_invalid", message)
 				continue
 			}
 			if result.Err != nil {
-				resp.Rejected++
 				s.metrics.eventsRejected.Add(1)
+				resp.AddRejected(i, eventID, "delivery_failed", result.Err.Error(), true)
 				s.sinkHealthy.Store(false)
 				if s.cfg.reliabilityMode == "queue" {
 					logJSON("error", "collector_kafka_enqueue_failed", map[string]any{"error": result.Err.Error()})
@@ -123,11 +206,12 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 			s.sinkHealthy.Store(true)
 		}
 
-		resp.Accepted++
+		resp.AddAccepted(i, eventID)
 		s.metrics.eventsAccepted.Add(1)
 		s.broadcastTail(raw)
 	}
 
+	resp.Finalize()
 	status := http.StatusAccepted
 	switch {
 	case resp.Accepted == 0 && resp.Invalid > 0 && resp.Rejected == 0:
@@ -141,12 +225,37 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
+func validateEventContract(raw []byte, expectedSchemaVersion, expectedEventVersion string) (string, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "invalid_json", true
+	}
+	if schemaVersion, _ := payload["schema_version"].(string); schemaVersion != "" && schemaVersion != expectedSchemaVersion {
+		return "unsupported_schema_version", true
+	}
+	if eventVersion, _ := payload["event_version"].(string); eventVersion != "" && eventVersion != expectedEventVersion {
+		return "unsupported_event_version", true
+	}
+	return "", false
+}
+
 func isDiskFullErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "no space left") || strings.Contains(s, "disk full")
+}
+
+func newIngestRequestID() string {
+	return fmt.Sprintf("ing_%d", time.Now().UTC().UnixNano())
+}
+
+func (c collectorConfig) retryAfterMS() int {
+	if c.retryInitialBackoff > 0 {
+		return int(c.retryInitialBackoff / time.Millisecond)
+	}
+	return 1000
 }
 
 func (s *collectorState) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -217,6 +326,17 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 		if !validation.IsJSONObject(raw) {
 			s.metrics.eventsInvalid.Add(1)
 			continue
+		}
+		if reason, ok := validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
+			_ = reason
+			s.metrics.eventsInvalid.Add(1)
+			continue
+		}
+		if prepared, gerr := s.prepareEvent(raw); gerr != nil {
+			s.metrics.eventsInvalid.Add(1)
+			continue
+		} else {
+			raw = prepared
 		}
 
 		if s.cfg.dedupeEnabled {

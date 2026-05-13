@@ -68,6 +68,34 @@ type collectorConfig struct {
 	maxSpoolBytes           int64
 	spoolFsync              bool
 	deliveryQueueSize       int
+	maxInflightRequests     int
+	maxInflightEvents       int
+	maxQueueBytes           int64
+	maxEventBytes           int64
+	maxAttrCount            int
+	maxAttrDepth            int
+	maxStringLength         int
+	identityMode            string
+	authIdentityWins        bool
+	allowPayloadIdentity    bool
+	boundServiceName        string
+	boundServiceVersion     string
+	boundEnvironment        string
+	boundRegion             string
+	boundTenantID           string
+	boundWorkspaceID        string
+	boundOrganizationID     string
+	privacyMode             string
+	collectorRedaction      bool
+	emergencyRedaction      bool
+	privacyAllowlist        []string
+	privacyBlocklist        []string
+	secretScan              bool
+	rightToDeleteEnabled    bool
+	receiverRegistry        []string
+	processorRegistry       []string
+	exporterRegistry        []string
+	extensionRegistry       []string
 	queueDir                string
 	queueBatchSize          int
 	queueBatchTimeout       time.Duration
@@ -153,6 +181,7 @@ type collectorState struct {
 	processor         *processing.Processor
 	reliabilityCtx    context.Context
 	reliabilityCancel context.CancelFunc
+	closeOnce         sync.Once
 }
 
 func (s *collectorState) GetMetrics() serverconfig.Metrics {

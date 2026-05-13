@@ -116,27 +116,29 @@ func (s *collectorState) saveSpoolPosition() error {
 }
 
 func (s *collectorState) closeReliability() {
-	if s.reliabilityCancel != nil {
-		s.reliabilityCancel()
-		s.reliabilityCancel = nil
-	}
-	if s.deliveryQueue != nil {
-		close(s.deliveryQueue)
-		s.deliveryWG.Wait()
-		s.deliveryQueue = nil
-	}
-	if s.spoolFile != nil {
-		if err := s.spoolFile.Close(); err != nil {
-			logJSON("error", "spool_close_failed", map[string]any{"error": err.Error()})
+	s.closeOnce.Do(func() {
+		if s.reliabilityCancel != nil {
+			s.reliabilityCancel()
+			s.reliabilityCancel = nil
 		}
-		s.spoolFile = nil
-	}
-	if s.processor != nil {
-		if err := s.processor.Close(); err != nil {
-			logJSON("error", "processor_close_failed", map[string]any{"error": err.Error()})
+		if s.deliveryQueue != nil {
+			close(s.deliveryQueue)
+			s.deliveryWG.Wait()
+			s.deliveryQueue = nil
 		}
-		s.processor = nil
-	}
+		if s.spoolFile != nil {
+			if err := s.spoolFile.Close(); err != nil {
+				logJSON("error", "spool_close_failed", map[string]any{"error": err.Error()})
+			}
+			s.spoolFile = nil
+		}
+		if s.processor != nil {
+			if err := s.processor.Close(); err != nil {
+				logJSON("error", "processor_close_failed", map[string]any{"error": err.Error()})
+			}
+			s.processor = nil
+		}
+	})
 }
 
 func (s *collectorState) appendSpool(raw []byte) error {
@@ -171,6 +173,9 @@ func (s *collectorState) enqueueDelivery(raw []byte) {
 	default:
 		s.metrics.sinkWriteErrors.Add(1)
 		logJSON("warn", "delivery_queue_full_dropping_event", nil)
+		// DLQ fallback for events dropped due to queue overflow
+		err := errors.New("delivery queue full - event dropped")
+		s.maybeWriteDLQ(raw, err)
 	}
 }
 
@@ -186,6 +191,8 @@ func (s *collectorState) processSpoolEvent(raw []byte) {
 		s.metrics.sinkWriteErrors.Add(1)
 		s.sinkHealthy.Store(false)
 		logJSON("error", "collector_pipeline_not_initialized", map[string]any{"error": err.Error()})
+		// DLQ fallback for pipeline init failure
+		s.maybeWriteDLQ(raw, err)
 		return
 	}
 
@@ -201,11 +208,19 @@ func (s *collectorState) processSpoolEvent(raw []byte) {
 	if result.Err != nil {
 		s.sinkHealthy.Store(false)
 		logJSON("error", "spool_delivery_failed", map[string]any{"error": result.Err.Error()})
+		s.maybeWriteDLQ(raw, result.Err)
 		return
 	}
 
 	s.sinkHealthy.Store(true)
 	s.markSpoolDelivered(raw)
+}
+
+func (s *collectorState) maybeWriteDLQ(raw []byte, err error) {
+	if s.processor == nil {
+		return
+	}
+	s.processor.WriteDLQ(raw, err)
 }
 
 func (s *collectorState) markSpoolDelivered(raw []byte) {

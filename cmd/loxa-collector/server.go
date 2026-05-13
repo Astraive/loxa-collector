@@ -139,6 +139,9 @@ func runCollector(cfg collectorConfig) error {
 		DLQOnSecondaryFail:      cfg.dlqOnSecondaryFail,
 		DLQOnFallbackFail:       state.cfg.dlqOnFallbackFail,
 		DLQOnPolicyFail:         state.cfg.dlqOnPolicyFail,
+		DedupeEnabled:           cfg.dedupeEnabled,
+		DedupeKey:               cfg.dedupeKey,
+		DedupeWindow:            cfg.dedupeWindow,
 		OnDiskFull: func() {
 			state.diskHealthy.Store(false)
 		},
@@ -167,8 +170,8 @@ func runCollector(cfg collectorConfig) error {
 		Handler:           mux,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		ReadTimeout:       cfg.readHeaderTimeout,
-		WriteTimeout:      cfg.shutdownTimeout,
-		IdleTimeout:       cfg.shutdownTimeout,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       cfg.serverConfig.HTTP.IdleTimeout,
 	}
 
 	go func() {
@@ -229,9 +232,29 @@ func runCollector(cfg collectorConfig) error {
 func buildMux(state *collectorState) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+state.cfg.ingestPath, state.handleIngest)
+	mux.HandleFunc("POST /v1/events", state.handleIngest)
+	mux.HandleFunc("POST /v1/events/batch", state.handleIngest)
+	mux.HandleFunc("POST /v1/events/ndjson", state.handleIngest)
 	mux.HandleFunc("GET "+state.cfg.healthPath, state.handleHealth)
+	mux.HandleFunc("GET /health", state.handleHealth)
 	mux.HandleFunc("GET "+state.cfg.readyPath, state.handleReady)
+	mux.HandleFunc("GET /ready", state.handleReady)
+	mux.HandleFunc("GET /version", state.handleVersion)
+	mux.HandleFunc("GET /v1/status", state.handleStatus)
+	mux.HandleFunc("GET /status", state.handleStatus)
+	mux.HandleFunc("GET /v1/sinks", state.handleSinks)
+	mux.HandleFunc("GET /sinks", state.handleSinks)
+	mux.HandleFunc("GET /v1/sinks/{name}", state.handleSink)
+	mux.HandleFunc("POST /v1/query", state.handleQuery)
+	mux.HandleFunc("POST /query", state.handleQuery)
+	mux.HandleFunc("GET /v1/dlq", state.handleDLQList)
+	mux.HandleFunc("GET /dlq", state.handleDLQList)
+	mux.HandleFunc("POST /v1/dlq/replay", state.handleDLQReplayAll)
+	mux.HandleFunc("GET /v1/dlq/{id}", state.handleDLQShow)
+	mux.HandleFunc("POST /v1/dlq/{id}/replay", state.handleDLQReplay)
+	mux.HandleFunc("DELETE /v1/dlq/{id}", state.handleDLQDelete)
 	mux.HandleFunc("GET /tail", state.handleTail)
+	mux.HandleFunc("GET /v1/tail", state.handleTail)
 	if state.cfg.metricsPrometheus {
 		mux.Handle("GET "+state.cfg.metricsPath, state.metricsHandler())
 	}

@@ -62,6 +62,9 @@ func (s *collectorState) ensureProcessor() error {
 		DLQOnSecondaryFail:      s.cfg.dlqOnSecondaryFail,
 		DLQOnFallbackFail:       s.cfg.dlqOnFallbackFail,
 		DLQOnPolicyFail:         s.cfg.dlqOnPolicyFail,
+		DedupeEnabled:           s.cfg.dedupeEnabled,
+		DedupeKey:               s.cfg.dedupeKey,
+		DedupeWindow:            s.cfg.dedupeWindow,
 		OnDiskFull: func() {
 			s.diskHealthy.Store(false)
 		},

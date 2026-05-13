@@ -48,7 +48,7 @@ type Config struct {
 }
 
 type SchemaConfig struct {
-	Mode           string // off, warn, reject, quarantine
+	Mode           string // off, warn, enforce/reject, quarantine
 	SchemaVersion  string
 	EventVersion   string
 	Registry       []SchemaRegistryEntry
@@ -199,13 +199,6 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 		return Result{Invalid: true, Err: ErrInvalidEvent}
 	}
 
-	if p.cfg.DedupeEnabled {
-		eventID, ok := validation.ExtractStringPath(raw, p.cfg.DedupeKey)
-		if ok && p.isDuplicate(eventID) {
-			return Result{Accepted: true, Deduped: true}
-		}
-	}
-
 	validated, err := p.validateSchema(raw)
 	if err != nil {
 		mode := strings.ToLower(p.cfg.Schema.Mode)
@@ -216,7 +209,7 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 			} else {
 				fmt.Fprintf(os.Stderr, "[WARN] schema validation warning: %v\n", err)
 			}
-		case "reject":
+		case "reject", "enforce":
 			return Result{Invalid: true, Err: err}
 		case "quarantine":
 			p.writeQuarantine(raw, err)
@@ -225,6 +218,13 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 	}
 	if validated != nil {
 		raw = validated
+	}
+
+	if p.cfg.DedupeEnabled {
+		eventID, ok := validation.ExtractStringPath(raw, p.cfg.DedupeKey)
+		if ok && p.isDuplicate(eventID) {
+			return Result{Accepted: true, Deduped: true}
+		}
 	}
 
 	outcome, err := p.deliverWithRetry(ctx, raw)
@@ -280,7 +280,7 @@ func (p *Processor) validateSchema(raw []byte) ([]byte, error) {
 					return raw, fmt.Errorf("schema validation: missing required field %q", field)
 				}
 			}
-		} else if mode == "reject" || mode == "quarantine" {
+		} else if mode == "reject" || mode == "enforce" || mode == "quarantine" {
 			return raw, fmt.Errorf("schema validation: unknown schema/event version combination (%s/%s)", sv, ev)
 		}
 	}
@@ -551,6 +551,19 @@ func (p *Processor) isDuplicate(value string) bool {
 	}
 	p.dedupeSeenAt[value] = now
 	return false
+}
+
+// WriteDLQ writes a raw event to the DLQ if DLQ is enabled.
+// This is exposed so that spool delivery can fall back to DLQ on failure.
+func (p *Processor) WriteDLQ(raw []byte, err error) {
+	if !p.cfg.DLQEnabled || p.dlqFile == nil {
+		return
+	}
+	dlqErr := err
+	if dlqErr == nil {
+		dlqErr = fmt.Errorf("spool delivery error")
+	}
+	p.writeDLQ(raw, dlqErr)
 }
 
 func isDiskFullErr(err error) bool {
