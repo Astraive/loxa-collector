@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -387,6 +388,14 @@ func buildMux(state *collectorState) *http.ServeMux {
 	mux.HandleFunc("GET /v1/tail", state.handleTail)
 	if state.cfg.metricsPrometheus {
 		mux.Handle("GET "+state.cfg.metricsPath, state.metricsHandler())
+	}
+	// Enable pprof handlers when LOXA_ENABLE_PPROF env var is set to 1/true.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("LOXA_ENABLE_PPROF"))); v == "1" || v == "true" {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	return mux
 }

@@ -167,6 +167,83 @@ func (s *sink) Flush(_ context.Context) error { return nil }
 
 func (s *sink) Close(_ context.Context) error { return s.conn.Close() }
 
+func buildBatchInsertStmt(table string, columns []string, storeRaw bool, rawColumn string) string {
+	cols := make([]string, 0, len(columns)+1)
+	for _, c := range columns {
+		cols = append(cols, "`"+c+"`")
+	}
+	if storeRaw {
+		cols = append(cols, rawColumn)
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES", table, strings.Join(cols, ", "))
+}
+
+// WriteBatch writes multiple events efficiently using ClickHouse batch API.
+func (s *sink) WriteBatch(ctx context.Context, events [][]byte) error {
+	if len(events) == 0 {
+		return nil
+	}
+	// Raw-only mode
+	if len(s.columns) == 0 {
+		stmt := buildBatchInsertStmt(s.table, nil, false, s.rawColumn)
+		batch, err := s.conn.PrepareBatch(ctx, stmt)
+		if err != nil {
+			return err
+		}
+		for _, e := range events {
+			val := string(e)
+			if s.encryptRaw {
+				enc, err := atrest.EncryptString(e, s.encryptKey)
+				if err != nil {
+					_ = batch.Abort()
+					return err
+				}
+				val = enc
+			}
+			if err := batch.Append(val); err != nil {
+				_ = batch.Abort()
+				return err
+			}
+		}
+		return batch.Send()
+	}
+
+	// Schema mode
+	stmt := buildBatchInsertStmt(s.table, s.columns, s.storeRaw, s.rawColumn)
+	batch, err := s.conn.PrepareBatch(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	for _, e := range events {
+		values, err := projection.ProjectValues(e, s.schema, s.columns)
+		if err != nil {
+			_ = batch.Abort()
+			return err
+		}
+		args := make([]any, 0, len(values)+1)
+		for _, v := range values {
+			args = append(args, v)
+		}
+		if s.storeRaw {
+			if s.encryptRaw {
+				enc, err := atrest.EncryptString(e, s.encryptKey)
+				if err != nil {
+					_ = batch.Abort()
+					return err
+				}
+				args = append(args, enc)
+			} else {
+				args = append(args, string(e))
+			}
+		}
+		if err := batch.Append(args...); err != nil {
+			_ = batch.Abort()
+			return err
+		}
+	}
+	return batch.Send()
+}
+
 func quoteTableName(table, quote string) (string, error) {
 	table = strings.TrimSpace(table)
 	if table == "" {

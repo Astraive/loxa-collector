@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"math/rand"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"github.com/astraive/loxa-collector/internal/sinks/internal/atrest"
@@ -18,6 +19,17 @@ import (
 )
 
 var identPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
+func retrySleep(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	return base + time.Duration(rand.Int63n(int64(base/2)))
+}
 
 // Config controls DuckDB sink behavior.
 type Config struct {
@@ -44,6 +56,15 @@ type Config struct {
 	// WriterQueueSize controls queue capacity when WriterLoop is enabled.
 	// If <= 0, a default is derived from BatchSize.
 	WriterQueueSize int
+	// WriteTimeout bounds internal write/flush operations that don't carry a caller deadline.
+	// Zero means 10s.
+	WriteTimeout time.Duration
+	// RetryAttempts controls retries for retryable write failures.
+	// Zero means no retries.
+	RetryAttempts int
+	// RetryBackoff controls delay between retries for retryable failures.
+	// Zero means 50ms.
+	RetryBackoff time.Duration
 	// UseAppender enables DuckDB's Appender API for high-performance ingest.
 	// Only effective when WriterLoop is enabled.
 	UseAppender bool
@@ -70,6 +91,9 @@ type sink struct {
 	useAppender bool
 	encryptRaw  bool
 	encryptKey  string
+	writeTimeout  time.Duration
+	retryAttempts int
+	retryBackoff  time.Duration
 	writerStmt  *sql.Stmt
 
 	mu      sync.Mutex
@@ -165,6 +189,18 @@ func New(cfg Config) (collectorevent.Sink, error) {
 		useAppender: cfg.UseAppender,
 		encryptRaw:  cfg.EncryptRaw,
 		encryptKey:  cfg.EncryptKey,
+		writeTimeout: cfg.WriteTimeout,
+		retryAttempts: cfg.RetryAttempts,
+		retryBackoff:  cfg.RetryBackoff,
+	}
+	if s.writeTimeout <= 0 {
+		s.writeTimeout = 10 * time.Second
+	}
+	if s.retryAttempts < 0 {
+		s.retryAttempts = 0
+	}
+	if s.retryBackoff <= 0 {
+		s.retryBackoff = 50 * time.Millisecond
 	}
 	if s.batchSize <= 0 {
 		s.batchSize = 1
@@ -202,8 +238,7 @@ func (s *sink) WriteEvent(ctx context.Context, encoded []byte, _ *collectorevent
 	}
 
 	if !s.batchEnabled {
-		_, err := s.db.ExecContext(ctx, s.insertQuery, args...)
-		return err
+		return s.execDirect(ctx, args)
 	}
 
 	if s.writerLoop {
@@ -334,30 +369,16 @@ func (s *sink) periodicFlush() {
 		case <-s.stopCh:
 			return
 		case <-t.C:
-			if err := s.Flush(s.getFlushContext()); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), s.writeTimeout)
+			err := s.Flush(ctx)
+			cancel()
+			if err != nil {
 				s.mu.Lock()
 				s.lastErr = err
 				s.mu.Unlock()
 			}
 		}
 	}
-}
-
-func (s *sink) getFlushContext() context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	// Cancel is called by Flush itself or by the next periodic flush
-	// Using a goroutine to auto-cancel after use
-	go func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		// Check if stopCh is closed
-		select {
-		case <-s.stopCh:
-			cancel()
-		default:
-		}
-	}()
-	return ctx
 }
 
 func (s *sink) writerWorker() {
@@ -389,7 +410,9 @@ func (s *sink) writerWorker() {
 		if len(batch) == 0 {
 			return nil
 		}
-		err := s.execBatchPrepared(context.Background(), s.writerStmt, batch)
+		ctx, cancel := context.WithTimeout(context.Background(), s.writeTimeout)
+		err := s.execBatchPrepared(ctx, s.writerStmt, batch)
+		cancel()
 		batch = batch[:0]
 		if err != nil {
 			s.mu.Lock()
@@ -563,7 +586,57 @@ func (s *sink) buildArgs(encoded []byte) ([]any, error) {
 	return args, nil
 }
 
+func (s *sink) execDirect(ctx context.Context, args []any) error {
+	ctx, cancel := s.contextWithWriteTimeout(ctx)
+	defer cancel()
+	var last error
+	for attempt := 0; attempt <= s.retryAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_, err := s.db.ExecContext(ctx, s.insertQuery, args...)
+		if err == nil {
+			return nil
+		}
+		last = err
+		if !isRetryableError(err) || attempt == s.retryAttempts {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retrySleep(s.retryBackoff)):
+		}
+	}
+	return last
+}
+
 func (s *sink) execBatch(ctx context.Context, batch [][]any) error {
+	ctx, cancel := s.contextWithWriteTimeout(ctx)
+	defer cancel()
+	var last error
+	for attempt := 0; attempt <= s.retryAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := s.execBatchOnce(ctx, batch)
+		if err == nil {
+			return nil
+		}
+		last = err
+		if !isRetryableError(err) || attempt == s.retryAttempts {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retrySleep(s.retryBackoff)):
+		}
+	}
+	return last
+}
+
+func (s *sink) execBatchOnce(ctx context.Context, batch [][]any) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -592,6 +665,31 @@ func (s *sink) execBatch(ctx context.Context, batch [][]any) error {
 }
 
 func (s *sink) execBatchPrepared(ctx context.Context, stmt *sql.Stmt, batch [][]any) error {
+	ctx, cancel := s.contextWithWriteTimeout(ctx)
+	defer cancel()
+	var last error
+	for attempt := 0; attempt <= s.retryAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := s.execBatchPreparedOnce(ctx, stmt, batch)
+		if err == nil {
+			return nil
+		}
+		last = err
+		if !isRetryableError(err) || attempt == s.retryAttempts {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retrySleep(s.retryBackoff)):
+		}
+	}
+	return last
+}
+
+func (s *sink) execBatchPreparedOnce(ctx context.Context, stmt *sql.Stmt, batch [][]any) error {
 	for _, args := range batch {
 		if _, err := stmt.ExecContext(ctx, args...); err != nil {
 			return err
@@ -600,10 +698,31 @@ func (s *sink) execBatchPrepared(ctx context.Context, stmt *sql.Stmt, batch [][]
 	return nil
 }
 
+func (s *sink) contextWithWriteTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), s.writeTimeout)
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline || s.writeTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.writeTimeout)
+}
+
 func cloneArgs(args []any) []any {
 	out := make([]any, len(args))
 	copy(out, args)
 	return out
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "busy") ||
+		strings.Contains(msg, "locked") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "temporar")
 }
 
 func quoteTableName(table string) (string, error) {
@@ -649,3 +768,6 @@ func buildSchemaInsertQuery(table string, columns []string, storeRaw bool, rawCo
 		strings.Join(placeholders, ", "),
 	)
 }
+
+
+

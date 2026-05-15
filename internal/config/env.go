@@ -70,6 +70,10 @@ func ApplyEnvOverrides(cfg *Config) error {
 		"DUCKDB_CHECKPOINT_INTERVAL":    durationSetter(&cfg.DuckDB.CheckpointInterval),
 		"DUCKDB_WRITER_LOOP":            boolSetter(&cfg.DuckDB.WriterLoop),
 		"DUCKDB_WRITER_QUEUE_SIZE":      intSetter(&cfg.DuckDB.WriterQueueSize),
+		"DUCKDB_USE_APPENDER":           boolSetter(&cfg.DuckDB.UseAppender),
+		"DUCKDB_WRITE_TIMEOUT":          durationSetter(&cfg.DuckDB.WriteTimeout),
+		"DUCKDB_RETRY_ATTEMPTS":         intSetter(&cfg.DuckDB.RetryAttempts),
+		"DUCKDB_RETRY_BACKOFF":          durationSetter(&cfg.DuckDB.RetryBackoff),
 
 		"DUCKDB_EXPORT_ENABLED":  boolSetter(&cfg.DuckDB.Export.Enabled),
 		"DUCKDB_EXPORT_FORMAT":   func(v string) error { cfg.DuckDB.Export.Format = v; return nil },

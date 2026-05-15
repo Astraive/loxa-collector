@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/marcboeker/go-duckdb"
 )
@@ -20,56 +21,50 @@ func BenchmarkDuckDBSink(b *testing.B) {
 	}
 	defer db.Close()
 
-	// Direct INSERT
-	b.Run("Direct", func(b *testing.B) {
-		setupTable(b, db, "events_direct")
-		sink, _ := New(Config{DB: db, Table: "events_direct"})
-		ctx := context.Background()
-		payload := []byte(`{"event":"test","val":123}`)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = sink.WriteEvent(ctx, payload, nil)
-		}
-	})
+	payloads := map[string][]byte{
+		"small":  []byte(`{"event":"test","val":123}`),
+		"medium": []byte(`{"event":"checkout.request","service":"checkout","user":{"id":"u-123","plan":"pro"},"http":{"method":"POST","path":"/checkout","status":200},"duration_ms":42,"outcome":"success"}`),
+	}
+	type scenario struct {
+		name string
+		cfg  Config
+	}
+	scenarios := []scenario{
+		{name: "direct", cfg: Config{}},
+		{name: "batch-32", cfg: Config{BatchSize: 32}},
+		{name: "batch-128", cfg: Config{BatchSize: 128}},
+		{name: "writer-loop-128", cfg: Config{BatchSize: 128, WriterLoop: true, FlushInterval: 25 * time.Millisecond}},
+		{name: "appender-128", cfg: Config{BatchSize: 128, WriterLoop: true, UseAppender: true, FlushInterval: 25 * time.Millisecond}},
+	}
 
-	// Batched INSERT (BatchSize 100)
-	b.Run("Batched_100", func(b *testing.B) {
-		setupTable(b, db, "events_batched")
-		sink, _ := New(Config{DB: db, Table: "events_batched", BatchSize: 100})
-		ctx := context.Background()
-		payload := []byte(`{"event":"test","val":123}`)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = sink.WriteEvent(ctx, payload, nil)
-		}
-		_ = sink.Flush(ctx)
-	})
+	for payloadName, payload := range payloads {
+		for _, sc := range scenarios {
+			sc := sc
+			b.Run(fmt.Sprintf("%s/%s", sc.name, payloadName), func(b *testing.B) {
+				table := fmt.Sprintf("events_%s_%s", sc.name, payloadName)
+				table = sanitizeTableName(table)
+				setupTable(b, db, table)
 
-	// WriterLoop (BatchSize 100)
-	b.Run("WriterLoop_100", func(b *testing.B) {
-		setupTable(b, db, "events_loop")
-		sink, _ := New(Config{DB: db, Table: "events_loop", BatchSize: 100, WriterLoop: true})
-		ctx := context.Background()
-		payload := []byte(`{"event":"test","val":123}`)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = sink.WriteEvent(ctx, payload, nil)
+				cfg := sc.cfg
+				cfg.DB = db
+				cfg.Table = table
+				sink, err := New(cfg)
+				if err != nil {
+					b.Fatal(err)
+				}
+				ctx := context.Background()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := sink.WriteEvent(ctx, payload, nil); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if err := sink.Flush(ctx); err != nil {
+					b.Fatal(err)
+				}
+			})
 		}
-		_ = sink.Flush(ctx)
-	})
-
-	// Appender (BatchSize 100)
-	b.Run("Appender_100", func(b *testing.B) {
-		setupTable(b, db, "events_appender")
-		sink, _ := New(Config{DB: db, Table: "events_appender", BatchSize: 100, WriterLoop: true, UseAppender: true})
-		ctx := context.Background()
-		payload := []byte(`{"event":"test","val":123}`)
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			_ = sink.WriteEvent(ctx, payload, nil)
-		}
-		_ = sink.Flush(ctx)
-	})
+	}
 }
 
 func setupTable(b *testing.B, db *sql.DB, table string) {
@@ -81,4 +76,19 @@ func setupTable(b *testing.B, db *sql.DB, table string) {
 	if err != nil {
 		b.Fatal(err)
 	}
+}
+
+func sanitizeTableName(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			out = append(out, r)
+		case r >= '0' && r <= '9':
+			out = append(out, r)
+		default:
+			out = append(out, '_')
+		}
+	}
+	return string(out)
 }

@@ -64,6 +64,10 @@ duckdb:
   flush_interval: 0s
   writer_loop: false
   writer_queue_size: 0
+  use_appender: false
+  write_timeout: 10s
+  retry_attempts: 0
+  retry_backoff: 50ms
   export:
     enabled: false
     format: parquet

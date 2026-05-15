@@ -133,6 +133,14 @@ type DuckDBConfig struct {
 	FlushInterval        time.Duration     `yaml:"flush_interval"`
 	WriterLoop           bool              `yaml:"writer_loop"`
 	WriterQueueSize      int               `yaml:"writer_queue_size"`
+	// UseAppender enables DuckDB Appender API for higher throughput when available.
+	UseAppender          bool              `yaml:"use_appender"`
+	// WriteTimeout bounds background writes when no caller deadline is present.
+	WriteTimeout         time.Duration     `yaml:"write_timeout"`
+	// RetryAttempts controls retries for transient DB errors.
+	RetryAttempts        int               `yaml:"retry_attempts"`
+	// RetryBackoff is the backoff between retry attempts.
+	RetryBackoff         time.Duration     `yaml:"retry_backoff"`
 	Export               DuckDBExport      `yaml:"export"`
 	Schema               map[string]string `yaml:"schema"`
 	ColumnTypes          map[string]string `yaml:"column_types"`

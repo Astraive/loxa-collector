@@ -48,6 +48,10 @@ type collectorConfig struct {
 	duckDBFlushInterval     time.Duration
 	duckDBWriterLoop        bool
 	duckDBWriterQueueSize   int
+	duckDBUseAppender       bool
+	duckDBWriteTimeout      time.Duration
+	duckDBRetryAttempts     int
+	duckDBRetryBackoff      time.Duration
 	duckDBCheckpointIntvl   time.Duration
 	duckDBExportEnabled     bool
 	duckDBExportFormat      string

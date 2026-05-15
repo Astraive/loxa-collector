@@ -34,6 +34,10 @@ func loadCollectorConfigFromArgs(args []string) (collectorConfig, error) {
 	duckDBPath := fs.String("duckdb-path", "", "duckdb path (overrides config)")
 	duckDBBatchSize := fs.Int("batch-size", 0, "duckdb batch size (overrides config)")
 	duckDBFlushInterval := fs.Duration("flush-interval", 0, "duckdb flush interval (overrides config)")
+	duckDBUseAppender := fs.Bool("use-appender", false, "enable duckdb appender (overrides config)")
+	duckDBWriteTimeout := fs.Duration("write-timeout", 0, "duckdb write timeout (overrides config)")
+	duckDBRetryAttempts := fs.Int("retry-attempts", -1, "duckdb retry attempts (overrides config)")
+	duckDBRetryBackoff := fs.Duration("retry-backoff", 0, "duckdb retry backoff (overrides config)")
 	maxBodyBytes := fs.Int64("max-body-bytes", 0, "max body bytes (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return collectorConfig{}, err
@@ -73,6 +77,21 @@ func loadCollectorConfigFromArgs(args []string) (collectorConfig, error) {
 	}
 	if set["flush-interval"] {
 		fc.DuckDB.FlushInterval = *duckDBFlushInterval
+	}
+	if set["use-appender"] {
+		fc.DuckDB.UseAppender = *duckDBUseAppender
+	}
+	if set["write-timeout"] {
+		fc.DuckDB.WriteTimeout = *duckDBWriteTimeout
+	}
+	if set["retry-attempts"] {
+		// only override if provided (default flag -1 indicates unset)
+		if *duckDBRetryAttempts >= 0 {
+			fc.DuckDB.RetryAttempts = *duckDBRetryAttempts
+		}
+	}
+	if set["retry-backoff"] {
+		fc.DuckDB.RetryBackoff = *duckDBRetryBackoff
 	}
 	if set["max-body-bytes"] {
 		fc.Collector.MaxBodyBytes = *maxBodyBytes
@@ -285,6 +304,18 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return err
 	}
 	if err := setInt("DUCKDB_WRITER_QUEUE_SIZE", &fc.DuckDB.WriterQueueSize); err != nil {
+		return err
+	}
+	if err := setBool("DUCKDB_USE_APPENDER", &fc.DuckDB.UseAppender); err != nil {
+		return err
+	}
+	if err := setDuration("DUCKDB_WRITE_TIMEOUT", &fc.DuckDB.WriteTimeout); err != nil {
+		return err
+	}
+	if err := setInt("DUCKDB_RETRY_ATTEMPTS", &fc.DuckDB.RetryAttempts); err != nil {
+		return err
+	}
+	if err := setDuration("DUCKDB_RETRY_BACKOFF", &fc.DuckDB.RetryBackoff); err != nil {
 		return err
 	}
 	if err := setDuration("DUCKDB_CHECKPOINT_INTERVAL", &fc.DuckDB.CheckpointInterval); err != nil {
@@ -879,6 +910,10 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		duckDBFlushInterval:     fc.DuckDB.FlushInterval,
 		duckDBWriterLoop:        fc.DuckDB.WriterLoop,
 		duckDBWriterQueueSize:   fc.DuckDB.WriterQueueSize,
+		duckDBUseAppender:       fc.DuckDB.UseAppender,
+		duckDBWriteTimeout:      fc.DuckDB.WriteTimeout,
+		duckDBRetryAttempts:     fc.DuckDB.RetryAttempts,
+		duckDBRetryBackoff:      fc.DuckDB.RetryBackoff,
 		duckDBCheckpointIntvl:   fc.DuckDB.CheckpointInterval,
 		duckDBExportEnabled:     fc.DuckDB.Export.Enabled,
 		duckDBExportFormat:      strings.ToLower(fc.DuckDB.Export.Format),

@@ -243,6 +243,32 @@ duckdb:
 	}
 }
 
+func TestLoadCollectorConfigDuckDBNewOptions(t *testing.T) {
+	// ensure CLI flags and env vars map to new duckdb options
+	t.Setenv("DUCKDB_USE_APPENDER", "true")
+	t.Setenv("DUCKDB_WRITE_TIMEOUT", "5s")
+	t.Setenv("DUCKDB_RETRY_ATTEMPTS", "3")
+	t.Setenv("DUCKDB_RETRY_BACKOFF", "100ms")
+
+	cfg, err := loadCollectorConfigFromArgs([]string{"--use-appender", "--write-timeout", "10s", "--retry-attempts", "5", "--retry-backoff", "200ms"})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	// CLI flags should override env
+	if !cfg.duckDBUseAppender {
+		t.Fatalf("expected use_appender from flag to be true")
+	}
+	if cfg.duckDBWriteTimeout != 10*time.Second {
+		t.Fatalf("unexpected write timeout: %s", cfg.duckDBWriteTimeout)
+	}
+	if cfg.duckDBRetryAttempts != 5 {
+		t.Fatalf("unexpected retry attempts: %d", cfg.duckDBRetryAttempts)
+	}
+	if cfg.duckDBRetryBackoff != 200*time.Millisecond {
+		t.Fatalf("unexpected retry backoff: %s", cfg.duckDBRetryBackoff)
+	}
+}
+
 func runConfigCommandCaptureOutput(t *testing.T, args []string) string {
 	t.Helper()
 	orig := os.Stdout

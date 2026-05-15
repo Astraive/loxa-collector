@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -448,5 +449,52 @@ func assertRowCount(t *testing.T, db *sql.DB, want int) {
 	t.Helper()
 	if got := rowCount(t, db); got != want {
 		t.Fatalf("row count mismatch: want=%d got=%d", want, got)
+	}
+}
+
+func TestIsRetryableError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{err: nil, want: false},
+		{err: errors.New("database is locked"), want: true},
+		{err: errors.New("BUSY"), want: true},
+		{err: errors.New("temporary I/O timeout"), want: true},
+		{err: errors.New("syntax error near SELECT"), want: false},
+	}
+	for _, tc := range cases {
+		got := isRetryableError(tc.err)
+		if got != tc.want {
+			t.Fatalf("isRetryableError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestContextWithWriteTimeout(t *testing.T) {
+	s := &sink{writeTimeout: 50 * time.Millisecond}
+	ctx, cancel := s.contextWithWriteTimeout(context.Background())
+	defer cancel()
+
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatalf("expected deadline to be applied")
+	}
+}
+
+func TestContextWithWriteTimeoutKeepsExistingDeadline(t *testing.T) {
+	base, baseCancel := context.WithTimeout(context.Background(), time.Second)
+	defer baseCancel()
+
+	s := &sink{writeTimeout: 10 * time.Millisecond}
+	ctx, cancel := s.contextWithWriteTimeout(base)
+	defer cancel()
+
+	d1, ok1 := base.Deadline()
+	d2, ok2 := ctx.Deadline()
+	if !ok1 || !ok2 {
+		t.Fatalf("expected both contexts to have deadlines")
+	}
+	if !d1.Equal(d2) {
+		t.Fatalf("expected existing deadline to be preserved")
 	}
 }
