@@ -259,6 +259,25 @@ func TestHandleIngestSingleJSONObject(t *testing.T) {
 	}
 }
 
+func TestPrepareEventNormalizesEventTypeAlias(t *testing.T) {
+	state := &collectorState{cfg: testCollectorConfig()}
+	raw := []byte(`{"schema_version":"v1","event_version":"v1","event_id":"evt-alias","service":"checkout","event_type":"checkout.request"}`)
+	next, govErr := state.prepareEvent(raw)
+	if govErr != nil {
+		t.Fatalf("prepare event: %v", govErr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(next, &payload); err != nil {
+		t.Fatalf("decode normalized event: %v", err)
+	}
+	if payload["event"] != "checkout.request" {
+		t.Fatalf("expected event alias normalization, got %#v", payload["event"])
+	}
+	if _, ok := payload["event_type"]; ok {
+		t.Fatalf("expected event_type alias to be removed after normalization")
+	}
+}
+
 func TestHandleIngestInvalidJSON(t *testing.T) {
 	sink := &fakeSink{}
 	state := &collectorState{

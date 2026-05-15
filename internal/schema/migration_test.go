@@ -1,1 +1,14 @@
-package schema_test\n\nimport (\n\t"os"\n\t"path/filepath"\n\t"testing"\n)\n\nfunc TestEventVersionMigration_SkippedIfNoFixtures(t *testing.T) {\n\tfixturesDir := filepath.Join("..", "..", "..", "spec", "golden", "migrations")\n\tif _, err := os.Stat(fixturesDir); os.IsNotExist(err) {\n\t\tt.Skip("no migration fixtures present; skipping migration tests")\n\t}\n\t// If fixtures exist, real migration tests would run here to validate event version upgrades.\n}\n
+package schema_test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestEventVersionMigrationSkippedIfNoFixtures(t *testing.T) {
+	fixturesDir := filepath.Join("..", "..", "..", "loxa-spec", "examples", "golden", "migrations")
+	if _, err := os.Stat(fixturesDir); os.IsNotExist(err) {
+		t.Skip("no migration fixtures present; skipping migration tests")
+	}
+}

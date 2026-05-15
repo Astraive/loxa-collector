@@ -35,6 +35,9 @@ func (s *collectorState) prepareEvent(raw []byte) ([]byte, *governanceError) {
 	}
 
 	modified := false
+	if normalizeCanonicalAliases(payload) {
+		modified = true
+	}
 	if s.applyIdentity(payload) {
 		modified = true
 	}
@@ -55,6 +58,22 @@ func (s *collectorState) prepareEvent(raw []byte) ([]byte, *governanceError) {
 		}
 	}
 	return next, nil
+}
+
+func normalizeCanonicalAliases(payload map[string]any) bool {
+	if event, ok := payload["event"].(string); ok && strings.TrimSpace(event) != "" {
+		if _, aliasPresent := payload["event_type"]; aliasPresent {
+			delete(payload, "event_type")
+			return true
+		}
+		return false
+	}
+	if alias, ok := payload["event_type"].(string); ok && strings.TrimSpace(alias) != "" {
+		payload["event"] = alias
+		delete(payload, "event_type")
+		return true
+	}
+	return false
 }
 
 func (s *collectorState) enforcePayloadLimits(payload map[string]any) *governanceError {
