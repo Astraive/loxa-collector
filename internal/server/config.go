@@ -24,23 +24,28 @@ type Config struct {
 }
 
 type HTTPConfig struct {
-	Enabled           bool
-	Addr              string
-	ReadHeaderTimeout time.Duration
-	MaxBodyBytes      int64
-	MaxHeaderBytes    int64
-	IdleTimeout       time.Duration
-	IngestPath        string
-	HealthPath        string
-	ReadyPath         string
-	MetricsPath       string
-	MetricsEnabled    bool
-	AuthEnabled       bool
-	AuthHeader        string
-	AuthValue         string
-	RateLimitEnabled  bool
-	RateLimitRPS      float64
-	RateLimitBurst    int
+	Enabled              bool
+	Addr                 string
+	ReadHeaderTimeout    time.Duration
+	MaxBodyBytes         int64
+	MaxHeaderBytes       int64
+	IdleTimeout          time.Duration
+	TLSEnabled           bool
+	TLSCertFile          string
+	TLSKeyFile           string
+	TLSClientCAFile      string
+	TLSRequireClientCert bool
+	IngestPath           string
+	HealthPath           string
+	ReadyPath            string
+	MetricsPath          string
+	MetricsEnabled       bool
+	AuthEnabled          bool
+	AuthHeader           string
+	AuthValue            string
+	RateLimitEnabled     bool
+	RateLimitRPS         float64
+	RateLimitBurst       int
 }
 
 type GRPCConfig struct {

@@ -18,7 +18,7 @@ type governanceError struct {
 func (e governanceError) Error() string { return e.Message }
 
 func (s *collectorState) prepareEvent(raw []byte) ([]byte, *governanceError) {
-	if s.cfg.maxEventBytes > 0 && int64(len(raw)) > s.cfg.maxEventBytes {
+	if s.limitsEnabled() && s.cfg.maxEventBytes > 0 && int64(len(raw)) > s.cfg.maxEventBytes {
 		return raw, &governanceError{
 			Code:    "event_too_large",
 			Message: fmt.Sprintf("event exceeds max_event_bytes (%d > %d)", len(raw), s.cfg.maxEventBytes),
@@ -48,7 +48,7 @@ func (s *collectorState) prepareEvent(raw []byte) ([]byte, *governanceError) {
 	if err != nil {
 		return raw, &governanceError{Code: "event_rewrite_failed", Message: err.Error(), Retryable: true}
 	}
-	if s.cfg.maxEventBytes > 0 && int64(len(next)) > s.cfg.maxEventBytes {
+	if s.limitsEnabled() && s.cfg.maxEventBytes > 0 && int64(len(next)) > s.cfg.maxEventBytes {
 		return raw, &governanceError{
 			Code:    "event_too_large_after_governance",
 			Message: fmt.Sprintf("event exceeds max_event_bytes after collector governance (%d > %d)", len(next), s.cfg.maxEventBytes),
@@ -58,6 +58,9 @@ func (s *collectorState) prepareEvent(raw []byte) ([]byte, *governanceError) {
 }
 
 func (s *collectorState) enforcePayloadLimits(payload map[string]any) *governanceError {
+	if !s.limitsEnabled() {
+		return nil
+	}
 	if s.cfg.maxAttrCount > 0 {
 		if count := countFields(payload); count > s.cfg.maxAttrCount {
 			return &governanceError{
@@ -86,6 +89,9 @@ func (s *collectorState) enforcePayloadLimits(payload map[string]any) *governanc
 }
 
 func (s *collectorState) applyIdentity(payload map[string]any) bool {
+	if !s.identityEnabled() {
+		return false
+	}
 	if !s.cfg.authIdentityWins || s.cfg.allowPayloadIdentity {
 		return false
 	}
@@ -126,6 +132,9 @@ func (s *collectorState) applyIdentity(payload map[string]any) bool {
 }
 
 func (s *collectorState) applyCollectorRedaction(payload map[string]any) bool {
+	if !s.redactionEnabled() {
+		return false
+	}
 	mode := strings.ToLower(strings.TrimSpace(s.cfg.privacyMode))
 	if mode == "off" || (!s.cfg.collectorRedaction && !s.cfg.emergencyRedaction) {
 		return false

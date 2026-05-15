@@ -51,6 +51,9 @@ func loadCollectorConfigFromArgs(args []string) (collectorConfig, error) {
 	if err := applyEnvOverrides(&fc); err != nil {
 		return collectorConfig{}, err
 	}
+	if err := loadSchemaRegistryFile(&fc); err != nil {
+		return collectorConfig{}, err
+	}
 
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
@@ -78,7 +81,10 @@ func loadCollectorConfigFromArgs(args []string) (collectorConfig, error) {
 	if err := validateFileConfig(fc); err != nil {
 		return collectorConfig{}, err
 	}
-	return runtimeConfigFromFile(fc), nil
+	cfg := runtimeConfigFromFile(fc)
+	cfg.configFile = *cfgFile
+	cfg.configArgs = append([]string(nil), args...)
+	return cfg, nil
 }
 
 func configCommand(args []string) error {
@@ -244,6 +250,9 @@ func applyEnvOverrides(fc *fileConfig) error {
 		fc.Auth.Value = v
 		fc.Auth.Enabled = true
 	}
+	if v, ok := get("LOXA_STORAGE_ENCRYPTION_KEY"); ok {
+		fc.Storage.EncryptionKey = v
+	}
 	if err := setBool("COLLECTOR_RATE_LIMIT_ENABLED", &fc.RateLimit.Enabled); err != nil {
 		return err
 	}
@@ -390,6 +399,17 @@ func applyEnvOverrides(fc *fileConfig) error {
 		return err
 	}
 	setStringLower("COLLECTOR_DEDUPE_BACKEND", &fc.Dedupe.Backend)
+	setString("COLLECTOR_DEDUPE_REDIS_ADDR", &fc.Dedupe.RedisAddr)
+	setString("COLLECTOR_DEDUPE_REDIS_PASSWORD", &fc.Dedupe.RedisPassword)
+	if err := setInt("COLLECTOR_DEDUPE_REDIS_DB", &fc.Dedupe.RedisDB); err != nil {
+		return err
+	}
+	setString("COLLECTOR_DEDUPE_REDIS_PREFIX", &fc.Dedupe.RedisPrefix)
+	if fc.Storage.EncryptionKey == "" && strings.TrimSpace(fc.Storage.EncryptionKeyEnv) != "" {
+		if v, ok := get(fc.Storage.EncryptionKeyEnv); ok {
+			fc.Storage.EncryptionKey = v
+		}
+	}
 	setStringLower("COLLECTOR_IDENTITY_MODE", &fc.Identity.Mode)
 	if err := setBool("COLLECTOR_AUTH_IDENTITY_WINS", &fc.Identity.AuthIdentityWins); err != nil {
 		return err
@@ -458,21 +478,21 @@ func validateFileConfig(fc fileConfig) error {
 		return errors.New("storage.primary must currently be duckdb")
 	}
 	mode := strings.ToLower(strings.TrimSpace(fc.Reliability.Mode))
-	if mode != "direct" && mode != "spool" && mode != "queue" {
-		return errors.New("reliability.mode must be direct, spool, or queue")
+	if mode != "direct" && mode != "spool" && mode != "queue" && mode != "hybrid" {
+		return errors.New("reliability.mode must be direct, spool, queue, or hybrid")
 	}
-	if mode == "spool" {
+	if mode == "spool" || mode == "hybrid" {
 		if strings.TrimSpace(fc.Reliability.SpoolDir) == "" {
-			return errors.New("reliability.spool_dir must not be empty in spool mode")
+			return errors.New("reliability.spool_dir must not be empty in spool/hybrid mode")
 		}
 		if strings.TrimSpace(fc.Reliability.SpoolFile) == "" {
-			return errors.New("reliability.spool_file must not be empty in spool mode")
+			return errors.New("reliability.spool_file must not be empty in spool/hybrid mode")
 		}
 		if fc.Reliability.MaxSpoolBytes <= 0 {
-			return errors.New("reliability.max_spool_bytes must be > 0 in spool mode")
+			return errors.New("reliability.max_spool_bytes must be > 0 in spool/hybrid mode")
 		}
 		if fc.Reliability.DeliveryQueueSize <= 0 {
-			return errors.New("reliability.delivery_queue_size must be > 0 in spool mode")
+			return errors.New("reliability.delivery_queue_size must be > 0 in spool/hybrid mode")
 		}
 	}
 	if fc.Limits.MaxInflightRequests < 0 {
@@ -509,9 +529,9 @@ func validateFileConfig(fc fileConfig) error {
 	if err := validateComponentRegistry(fc.Components); err != nil {
 		return err
 	}
-	if mode == "queue" {
+	if mode == "queue" || mode == "hybrid" {
 		if len(fc.Kafka.Brokers) == 0 {
-			return errors.New("kafka.brokers must be configured in queue mode")
+			return errors.New("kafka.brokers must be configured in queue/hybrid mode")
 		}
 		for i, broker := range fc.Kafka.Brokers {
 			if strings.TrimSpace(broker) == "" {
@@ -519,7 +539,7 @@ func validateFileConfig(fc fileConfig) error {
 			}
 		}
 		if strings.TrimSpace(fc.Kafka.Topic) == "" {
-			return errors.New("kafka.topic must not be empty in queue mode")
+			return errors.New("kafka.topic must not be empty in queue/hybrid mode")
 		}
 	}
 	if strings.TrimSpace(fc.Worker.ConsumerGroup) == "" {
@@ -534,6 +554,11 @@ func validateFileConfig(fc fileConfig) error {
 		}
 		if fc.Retry.InitialBackoff <= 0 || fc.Retry.MaxBackoff <= 0 {
 			return errors.New("retry backoff durations must be > 0")
+		}
+	}
+	if fc.Collector.Server.HTTP.TLS.Enabled {
+		if strings.TrimSpace(fc.Collector.Server.HTTP.TLS.CertFile) == "" || strings.TrimSpace(fc.Collector.Server.HTTP.TLS.KeyFile) == "" {
+			return errors.New("collector.server.http.tls cert_file and key_file must be set when http tls is enabled")
 		}
 	}
 	if fc.DeadLetter.Enabled && strings.TrimSpace(fc.DeadLetter.Path) == "" {
@@ -569,7 +594,7 @@ func validateFileConfig(fc fileConfig) error {
 			sinkType = fanoutSinkDuckDB
 		}
 		if sinkType != fanoutSinkDuckDB && sinkType != fanoutSinkLoki && sinkType != fanoutSinkOTLP &&
-			sinkType != fanoutSinkClickHouse && sinkType != fanoutSinkS3 && sinkType != fanoutSinkGCS {
+			sinkType != fanoutSinkClickHouse && sinkType != fanoutSinkPostgres && sinkType != fanoutSinkS3 && sinkType != fanoutSinkGCS {
 			return fmt.Errorf("fanout.outputs[%d].type %q is not supported", i, sinkType)
 		}
 
@@ -599,6 +624,16 @@ func validateFileConfig(fc fileConfig) error {
 			if len(output.ClickHouse.Addrs) == 0 {
 				return fmt.Errorf("fanout.outputs[%d].clickhouse.addrs must not be empty when enabled", i)
 			}
+		case fanoutSinkPostgres:
+			if strings.TrimSpace(output.Postgres.DSN) == "" {
+				return fmt.Errorf("fanout.outputs[%d].postgres.dsn must not be empty when enabled", i)
+			}
+			if table := strings.TrimSpace(output.Postgres.Table); table != "" && !validTableName(table) {
+				return fmt.Errorf("fanout.outputs[%d].postgres.table %q is invalid", i, table)
+			}
+			if rawColumn := strings.TrimSpace(output.Postgres.RawColumn); rawColumn != "" && !configIdentPattern.MatchString(rawColumn) {
+				return fmt.Errorf("fanout.outputs[%d].postgres.raw_column %q is invalid", i, rawColumn)
+			}
 		case fanoutSinkS3:
 			if strings.TrimSpace(output.S3.Bucket) == "" {
 				return fmt.Errorf("fanout.outputs[%d].s3.bucket must not be empty when enabled", i)
@@ -625,8 +660,14 @@ func validateFileConfig(fc fileConfig) error {
 		if fc.Dedupe.Window <= 0 {
 			return errors.New("dedupe.window must be > 0 when dedupe.enabled is true")
 		}
-		if strings.ToLower(strings.TrimSpace(fc.Dedupe.Backend)) != "memory" {
-			return errors.New("dedupe.backend must currently be memory")
+		switch strings.ToLower(strings.TrimSpace(fc.Dedupe.Backend)) {
+		case "", "memory":
+		case "redis":
+			if strings.TrimSpace(fc.Dedupe.RedisAddr) == "" {
+				return errors.New("dedupe.redis_addr must not be empty when dedupe.backend is redis")
+			}
+		default:
+			return errors.New("dedupe.backend must be memory or redis")
 		}
 	}
 	if !configIdentPattern.MatchString(fc.DuckDB.RawColumn) {
@@ -692,15 +733,53 @@ func validateFileConfig(fc fileConfig) error {
 }
 
 func validateComponentRegistry(reg collectorconfig.ComponentRegistryConfig) error {
+	allowed := map[string]map[string]struct{}{
+		"receivers": {
+			"loxa_http":   {},
+			"loxa_ndjson": {},
+			"loxa_grpc":   {},
+			"otlp":        {},
+		},
+		"processors": {
+			"validate":          {},
+			"redact":            {},
+			"dedupe":            {},
+			"memory_limiter":    {},
+			"cardinality_limit": {},
+			"size_limit":        {},
+			"identity":          {},
+			"tenant_resolve":    {},
+			"enrich":            {},
+			"route":             {},
+		},
+		"exporters": {
+			"duckdb":     {},
+			"kafka":      {},
+			"loki":       {},
+			"otlp":       {},
+			"clickhouse": {},
+			"postgres":   {},
+			"s3":         {},
+			"gcs":        {},
+		},
+		"extensions": {
+			"health":  {},
+			"ready":   {},
+			"metrics": {},
+		},
+	}
 	check := func(kind string, values []string) error {
 		seen := map[string]struct{}{}
 		for i, value := range values {
-			value = strings.TrimSpace(value)
+			value = strings.ToLower(strings.TrimSpace(value))
 			if value == "" {
 				return fmt.Errorf("components.%s[%d] must not be empty", kind, i)
 			}
 			if _, ok := seen[value]; ok {
 				return fmt.Errorf("components.%s contains duplicate component %q", kind, value)
+			}
+			if _, ok := allowed[kind][value]; !ok {
+				return fmt.Errorf("components.%s[%d] unknown component %q", kind, i, value)
 			}
 			seen[value] = struct{}{}
 		}
@@ -730,23 +809,28 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		maxEventsPerRequest: fc.Collector.MaxEventsPerReq,
 		serverConfig: serverConfig{
 			HTTP: serverconfig.HTTPConfig{
-				Enabled:           fc.Collector.Server.HTTP.Enabled,
-				Addr:              fc.Collector.Server.HTTP.Addr,
-				ReadHeaderTimeout: fc.Collector.Server.HTTP.ReadHeaderTimeout,
-				MaxBodyBytes:      fc.Collector.Server.HTTP.MaxBodyBytes,
-				MaxHeaderBytes:    fc.Collector.Server.HTTP.MaxHeaderBytes,
-				IdleTimeout:       fc.Collector.Server.HTTP.IdleTimeout,
-				IngestPath:        fc.Routes.Ingest,
-				HealthPath:        fc.Routes.Health,
-				ReadyPath:         fc.Routes.Ready,
-				MetricsPath:       fc.Routes.Metrics,
-				MetricsEnabled:    fc.Metrics.Prometheus,
-				AuthEnabled:       fc.Auth.Enabled,
-				AuthHeader:        fc.Auth.Header,
-				AuthValue:         fc.Auth.Value,
-				RateLimitEnabled:  fc.RateLimit.Enabled,
-				RateLimitRPS:      fc.RateLimit.RPS,
-				RateLimitBurst:    fc.RateLimit.Burst,
+				Enabled:              fc.Collector.Server.HTTP.Enabled,
+				Addr:                 fc.Collector.Server.HTTP.Addr,
+				ReadHeaderTimeout:    fc.Collector.Server.HTTP.ReadHeaderTimeout,
+				MaxBodyBytes:         fc.Collector.Server.HTTP.MaxBodyBytes,
+				MaxHeaderBytes:       fc.Collector.Server.HTTP.MaxHeaderBytes,
+				IdleTimeout:          fc.Collector.Server.HTTP.IdleTimeout,
+				TLSEnabled:           fc.Collector.Server.HTTP.TLS.Enabled,
+				TLSCertFile:          fc.Collector.Server.HTTP.TLS.CertFile,
+				TLSKeyFile:           fc.Collector.Server.HTTP.TLS.KeyFile,
+				TLSClientCAFile:      fc.Collector.Server.HTTP.TLS.ClientCAFile,
+				TLSRequireClientCert: fc.Collector.Server.HTTP.TLS.RequireClientCert,
+				IngestPath:           fc.Routes.Ingest,
+				HealthPath:           fc.Routes.Health,
+				ReadyPath:            fc.Routes.Ready,
+				MetricsPath:          fc.Routes.Metrics,
+				MetricsEnabled:       fc.Metrics.Prometheus,
+				AuthEnabled:          fc.Auth.Enabled,
+				AuthHeader:           fc.Auth.Header,
+				AuthValue:            fc.Auth.Value,
+				RateLimitEnabled:     fc.RateLimit.Enabled,
+				RateLimitRPS:         fc.RateLimit.RPS,
+				RateLimitBurst:       fc.RateLimit.Burst,
 			},
 			GRPC: serverconfig.GRPCConfig{
 				Enabled:               fc.Collector.Server.GRPC.Enabled,
@@ -782,6 +866,7 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		readyPath:               fc.Routes.Ready,
 		metricsPath:             fc.Routes.Metrics,
 		storagePrimary:          fc.Storage.Primary,
+		storageEncryptionKey:    fc.Storage.EncryptionKey,
 		duckDBPath:              fc.DuckDB.Path,
 		duckDBDriver:            fc.DuckDB.Driver,
 		duckDBTable:             fc.DuckDB.Table,
@@ -865,6 +950,10 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		dedupeKey:               fc.Dedupe.Key,
 		dedupeWindow:            fc.Dedupe.Window,
 		dedupeBackend:           strings.ToLower(fc.Dedupe.Backend),
+		dedupeRedisAddr:         strings.TrimSpace(fc.Dedupe.RedisAddr),
+		dedupeRedisPassword:     fc.Dedupe.RedisPassword,
+		dedupeRedisDB:           fc.Dedupe.RedisDB,
+		dedupeRedisPrefix:       strings.TrimSpace(fc.Dedupe.RedisPrefix),
 		kafkaBrokers:            append([]string(nil), fc.Kafka.Brokers...),
 		kafkaTopic:              strings.TrimSpace(fc.Kafka.Topic),
 		kafkaAcks:               strings.ToLower(strings.TrimSpace(fc.Kafka.Acks)),
@@ -878,7 +967,11 @@ func runtimeConfigFromFile(fc fileConfig) collectorConfig {
 		schemaSchemaVersion:     strings.TrimSpace(fc.Schema.SchemaVersion),
 		schemaEventVersion:      strings.TrimSpace(fc.Schema.EventVersion),
 		schemaQuarantinePath:    strings.TrimSpace(fc.Schema.QuarantinePath),
+		schemaRegistryFile:      strings.TrimSpace(fc.Schema.RegistryFile),
 		schemaRegistry:          fc.Schema.Registry,
+		retentionEnabled:        fc.Retention.Enabled,
+		retentionDays:           fc.Retention.Days,
+		retentionMaxSize:        fc.Retention.MaxSize,
 	}
 }
 
@@ -913,6 +1006,11 @@ func fanoutOutputsFromFile(outputs []collectorconfig.FanoutOutputConfig) []colle
 			chSchema:        output.ClickHouse.Schema,
 			chStoreRaw:      output.ClickHouse.StoreRaw,
 			chRawColumn:     strings.TrimSpace(output.ClickHouse.RawColumn),
+			pgDSN:           strings.TrimSpace(output.Postgres.DSN),
+			pgTable:         strings.TrimSpace(output.Postgres.Table),
+			pgSchema:        output.Postgres.Schema,
+			pgStoreRaw:      output.Postgres.StoreRaw,
+			pgRawColumn:     strings.TrimSpace(output.Postgres.RawColumn),
 			s3Bucket:        strings.TrimSpace(output.S3.Bucket),
 			s3Prefix:        strings.TrimSpace(output.S3.Prefix),
 			s3Region:        strings.TrimSpace(output.S3.Region),

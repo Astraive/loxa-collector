@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,6 +17,7 @@ type Config struct {
 	Routes      RoutesConfig            `yaml:"routes"`
 	Storage     StorageConfig           `yaml:"storage"`
 	DuckDB      DuckDBConfig            `yaml:"duckdb"`
+	Retention   RetentionConfig         `yaml:"retention"`
 	Kafka       KafkaConfig             `yaml:"kafka"`
 	Worker      WorkerConfig            `yaml:"worker"`
 	Logging     LoggingConfig           `yaml:"logging"`
@@ -53,6 +56,7 @@ type HTTPConfig struct {
 	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
 	MaxHeaderBytes    int64         `yaml:"max_header_bytes"`
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	TLS               TLSConfig     `yaml:"tls"`
 }
 
 type GRPCConfig struct {
@@ -74,9 +78,11 @@ type KeepaliveConfig struct {
 }
 
 type TLSConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
+	Enabled           bool   `yaml:"enabled"`
+	CertFile          string `yaml:"cert_file"`
+	KeyFile           string `yaml:"key_file"`
+	ClientCAFile      string `yaml:"client_ca_file"`
+	RequireClientCert bool   `yaml:"require_client_cert"`
 }
 
 type GraphQLConfig struct {
@@ -108,7 +114,9 @@ type RoutesConfig struct {
 }
 
 type StorageConfig struct {
-	Primary string `yaml:"primary"`
+	Primary          string `yaml:"primary"`
+	EncryptionKeyEnv string `yaml:"encryption_key_env"`
+	EncryptionKey    string `yaml:"-"`
 }
 
 type DuckDBConfig struct {
@@ -135,6 +143,12 @@ type DuckDBExport struct {
 	Format   string        `yaml:"format"`
 	Interval time.Duration `yaml:"interval"`
 	Path     string        `yaml:"path"`
+}
+
+type RetentionConfig struct {
+	Enabled bool  `yaml:"enabled"`
+	Days    int   `yaml:"days"`
+	MaxSize int64 `yaml:"max_size"`
 }
 
 type KafkaConfig struct {
@@ -243,6 +257,7 @@ type FanoutOutputConfig struct {
 	Loki       FanoutLokiConfig       `yaml:"loki"`
 	OTLP       FanoutOTLPConfig       `yaml:"otlp"`
 	ClickHouse FanoutClickHouseConfig `yaml:"clickhouse"`
+	Postgres   FanoutPostgresConfig   `yaml:"postgres"`
 	S3         FanoutS3Config         `yaml:"s3"`
 	GCS        FanoutGCSConfig        `yaml:"gcs"`
 }
@@ -276,6 +291,14 @@ type FanoutClickHouseConfig struct {
 	Database  string            `yaml:"database"`
 	Username  string            `yaml:"username"`
 	Password  string            `yaml:"password"`
+	Table     string            `yaml:"table"`
+	Schema    map[string]string `yaml:"schema"`
+	StoreRaw  bool              `yaml:"store_raw"`
+	RawColumn string            `yaml:"raw_column"`
+}
+
+type FanoutPostgresConfig struct {
+	DSN       string            `yaml:"dsn"`
 	Table     string            `yaml:"table"`
 	Schema    map[string]string `yaml:"schema"`
 	StoreRaw  bool              `yaml:"store_raw"`
@@ -324,10 +347,14 @@ type FanoutDLQConfig struct {
 }
 
 type DedupeConfig struct {
-	Enabled bool          `yaml:"enabled"`
-	Key     string        `yaml:"key"`
-	Window  time.Duration `yaml:"window"`
-	Backend string        `yaml:"backend"`
+	Enabled       bool          `yaml:"enabled"`
+	Key           string        `yaml:"key"`
+	Window        time.Duration `yaml:"window"`
+	Backend       string        `yaml:"backend"`
+	RedisAddr     string        `yaml:"redis_addr"`
+	RedisPassword string        `yaml:"redis_password"`
+	RedisDB       int           `yaml:"redis_db"`
+	RedisPrefix   string        `yaml:"redis_prefix"`
 }
 
 type SchemaGovernanceConfig struct {
@@ -346,218 +373,16 @@ type SchemaRegistryEntry struct {
 }
 
 func Default() Config {
-	return Config{
-		Collector: CollectorConfig{
-			Addr:              ":9090",
-			ReadHeaderTimeout: 5 * time.Second,
-			ShutdownTimeout:   10 * time.Second,
-			MaxBodyBytes:      10 * 1024 * 1024,
-			MaxEventsPerReq:   5000,
-			Server: ServerConfig{
-				HTTP: HTTPConfig{
-					Enabled:           true,
-					Addr:              ":9090",
-					ReadHeaderTimeout: 5 * time.Second,
-					MaxBodyBytes:      10 * 1024 * 1024,
-					MaxHeaderBytes:    1 << 20,
-					IdleTimeout:       90 * time.Second,
-				},
-				GRPC: GRPCConfig{
-					Enabled:              false,
-					Port:                 ":9091",
-					MaxConnections:       1000,
-					MaxConcurrentStreams: 100,
-					MaxRecvMsgSize:       4 << 20,
-					MaxSendMsgSize:       4 << 20,
-					Keepalive: KeepaliveConfig{
-						MaxConnectionAge:      5 * time.Minute,
-						MaxConnectionAgeGrace: 30 * time.Second,
-						Time:                  2 * time.Minute,
-						Timeout:               20 * time.Second,
-					},
-				},
-				GraphQL: GraphQLConfig{
-					Enabled:    false,
-					Port:       ":9092",
-					Playground: true,
-					DepthLimit: 10,
-					BatchLimit: 10,
-				},
-			},
-		},
-		Auth: AuthConfig{
-			Enabled:  false,
-			Header:   "X-API-Key",
-			ValueEnv: "COLLECTOR_API_KEY",
-		},
-		RateLimit: RateLimitConfig{
-			Enabled: true,
-			RPS:     1000,
-			Burst:   1000,
-		},
-		Routes: RoutesConfig{
-			Ingest:  "/ingest",
-			Health:  "/healthz",
-			Ready:   "/readyz",
-			Metrics: "/metrics",
-		},
-		Storage: StorageConfig{
-			Primary: "duckdb",
-		},
-		DuckDB: DuckDBConfig{
-			Path:                 "loxa.db",
-			Driver:               "duckdb",
-			Table:                "events",
-			RawColumn:            "raw",
-			StoreRaw:             true,
-			CheckpointOnShutdown: true,
-			CheckpointInterval:   0,
-			MaxOpenConns:         1,
-			MaxIdleConns:         1,
-			BatchSize:            0,
-			FlushInterval:        0,
-			WriterLoop:           false,
-			WriterQueueSize:      0,
-			Export: DuckDBExport{
-				Enabled:  false,
-				Format:   "parquet",
-				Interval: time.Hour,
-				Path:     "exports",
-			},
-			Schema: map[string]string{
-				"event_id":    "event_id",
-				"event_type":  "event",
-				"service":     "service",
-				"status_code": "http.status",
-				"duration_ms": "duration_ms",
-				"timestamp":   "timestamp",
-			},
-			ColumnTypes: map[string]string{
-				"status_code": "INTEGER",
-				"http.status": "INTEGER",
-				"duration_ms": "DOUBLE",
-				"timestamp":   "TIMESTAMP",
-			},
-		},
-		Kafka: KafkaConfig{
-			Brokers: []string{"127.0.0.1:9092"},
-			Topic:   "loxa-events",
-		},
-		Worker: WorkerConfig{
-			ConsumerGroup: "loxa-worker",
-			PollTimeout:   2 * time.Second,
-		},
-		Logging: LoggingConfig{
-			Level:  "info",
-			Format: "json",
-		},
-		Metrics: MetricsConfig{
-			Prometheus: true,
-		},
-		Reliability: ReliabilityConfig{
-			Mode:              "direct",
-			SpoolDir:          "loxa-spool",
-			SpoolFile:         "spool.ndjson",
-			MaxSpoolBytes:     10 * 1024 * 1024 * 1024,
-			Fsync:             true,
-			DeliveryQueueSize: 4096,
-		},
-		Limits: LimitsConfig{
-			MaxInflightRequests: 1024,
-			MaxInflightEvents:   100000,
-			MaxQueueBytes:       256 * 1024 * 1024,
-			MaxEventBytes:       256 * 1024,
-			MaxAttrCount:        512,
-			MaxAttrDepth:        16,
-			MaxStringLength:     16 * 1024,
-		},
-		Identity: IdentityConfig{
-			Mode:                 "payload",
-			AuthIdentityWins:     true,
-			AllowPayloadIdentity: true,
-		},
-		Privacy: PrivacyConfig{
-			Mode:               "warn",
-			CollectorRedaction: true,
-			EmergencyRedaction: false,
-			Blocklist: []string{
-				"password",
-				"passwd",
-				"secret",
-				"token",
-				"api_key",
-				"apikey",
-				"authorization",
-				"cookie",
-				"set-cookie",
-				"private_key",
-				"access_token",
-				"refresh_token",
-				"session",
-			},
-			SecretScan: true,
-		},
-		Components: ComponentRegistryConfig{
-			Receivers:  []string{"loxa_http", "loxa_ndjson"},
-			Processors: []string{"validate", "redact", "dedupe", "memory_limiter", "cardinality_limit"},
-			Exporters:  []string{"duckdb"},
-			Extensions: []string{"health", "ready", "metrics"},
-		},
-		Retry: RetryConfig{
-			Enabled:        true,
-			MaxAttempts:    10,
-			InitialBackoff: 100 * time.Millisecond,
-			MaxBackoff:     30 * time.Second,
-			Jitter:         true,
-		},
-		DeadLetter: DeadLetterConfig{
-			Enabled: false,
-			Path:    "loxa-dlq.ndjson",
-		},
-		Fanout: FanoutConfig{
-			Outputs: nil,
-			Delivery: FanoutDeliveryPolicyConfig{
-				Policy: "require_primary",
-				Fallback: FanoutFallbackConfig{
-					Enabled:            false,
-					OnPrimaryFailure:   false,
-					OnSecondaryFailure: false,
-					OnPolicyFailure:    true,
-				},
-				DLQ: FanoutDLQConfig{
-					OnPrimaryFailure:   true,
-					OnSecondaryFailure: false,
-					OnFallbackFailure:  true,
-					OnPolicyFailure:    true,
-				},
-			},
-		},
-		Dedupe: DedupeConfig{
-			Enabled: false,
-			Key:     "event_id",
-			Window:  24 * time.Hour,
-			Backend: "memory",
-		},
-		Schema: SchemaGovernanceConfig{
-			Mode:          "off",
-			SchemaVersion: "v1",
-			EventVersion:  "v1",
-			Registry: []SchemaRegistryEntry{
-				{
-					SchemaVersion: "v1",
-					EventVersion:  "v1",
-					RequiredFields: []string{
-						"schema_version",
-						"event_version",
-						"event_id",
-						"event",
-						"timestamp",
-					},
-				},
-			},
-			QuarantinePath: "loxa-quarantine.ndjson",
-		},
+	path := findDefaultsFile()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		panic(fmt.Errorf("read collector defaults %s: %w", path, err))
 	}
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		panic(fmt.Errorf("parse collector defaults %s: %w", path, err))
+	}
+	return cfg
 }
 
 func Load(data []byte, cfg *Config) error {
@@ -574,4 +399,34 @@ func LoadFile(cfg *Config, path string) error {
 		return fmt.Errorf("parse config file %s: %w", path, err)
 	}
 	return nil
+}
+
+func findDefaultsFile() string {
+	if override := strings.TrimSpace(os.Getenv("LOXA_COLLECTOR_DEFAULTS")); override != "" {
+		return override
+	}
+
+	candidates := []string{
+		"loxa-collector.defaults.yaml",
+		filepath.Join("..", "loxa-collector.defaults.yaml"),
+		filepath.Join("..", "..", "loxa-collector.defaults.yaml"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+
+	exe, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 5; i++ {
+			candidate := filepath.Join(dir, "loxa-collector.defaults.yaml")
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return candidate
+			}
+			dir = filepath.Dir(dir)
+		}
+	}
+	return "loxa-collector.defaults.yaml"
 }

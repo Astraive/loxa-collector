@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
+	"github.com/astraive/loxa-collector/internal/sinks/internal/atrest"
 	"github.com/astraive/loxa-collector/internal/sinks/internal/projection"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,7 +23,9 @@ type Config struct {
 	// RawColumn is used for raw mode and optional raw storage in schema mode.
 	RawColumn string
 	// TLSConfig enables TLS for the Postgres connection when provided.
-	TLSConfig *tls.Config
+	TLSConfig  *tls.Config
+	EncryptRaw bool
+	EncryptKey string
 }
 
 type sink struct {
@@ -34,6 +37,8 @@ type sink struct {
 	rawQuery    string
 	schemaQuery string
 	storeRaw    bool
+	encryptRaw  bool
+	encryptKey  string
 }
 
 var tableIdentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -110,6 +115,8 @@ func New(ctx context.Context, cfg Config) (collectorevent.Sink, error) {
 		rawQuery:    fmt.Sprintf("INSERT INTO %s (%s) VALUES ($1)", quotedTable, quotedRaw),
 		schemaQuery: schemaQuery,
 		storeRaw:    storeRaw,
+		encryptRaw:  cfg.EncryptRaw,
+		encryptKey:  cfg.EncryptKey,
 	}, nil
 }
 
@@ -117,7 +124,15 @@ func (s *sink) Name() string { return "postgres" }
 
 func (s *sink) WriteEvent(ctx context.Context, encoded []byte, _ *collectorevent.Event) error {
 	if len(s.columns) == 0 {
-		_, err := s.pool.Exec(ctx, s.rawQuery, string(encoded))
+		value := string(encoded)
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return err
+			}
+			value = enc
+		}
+		_, err := s.pool.Exec(ctx, s.rawQuery, value)
 		return err
 	}
 
@@ -126,7 +141,15 @@ func (s *sink) WriteEvent(ctx context.Context, encoded []byte, _ *collectorevent
 		return err
 	}
 	if s.storeRaw {
-		values = append(values, string(encoded))
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return err
+			}
+			values = append(values, enc)
+		} else {
+			values = append(values, string(encoded))
+		}
 	}
 	_, err = s.pool.Exec(ctx, s.schemaQuery, values...)
 	return err

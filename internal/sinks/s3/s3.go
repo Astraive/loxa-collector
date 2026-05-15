@@ -10,6 +10,7 @@ import (
 	"time"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
+	"github.com/astraive/loxa-collector/internal/sinks/internal/atrest"
 	"github.com/astraive/loxa-collector/internal/sinks/internal/projection"
 	storagepath "github.com/astraive/loxa-collector/internal/storage"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -25,6 +26,7 @@ type Config struct {
 	Schema        map[string]string
 	BatchSize     int
 	FlushInterval time.Duration
+	EncryptKey    string
 }
 
 type sink struct {
@@ -207,6 +209,13 @@ func (s *sink) restore(payload []byte, n int) {
 
 func (s *sink) putObject(ctx context.Context, payload []byte) error {
 	key := s.cfg.ObjectKeyFn()
+	if strings.TrimSpace(s.cfg.EncryptKey) != "" {
+		var err error
+		payload, err = atrest.EncryptBytes(payload, s.cfg.EncryptKey)
+		if err != nil {
+			return err
+		}
+	}
 	_, err := s.cfg.Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      &s.cfg.Bucket,
 		Key:         &key,

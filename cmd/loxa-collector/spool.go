@@ -11,10 +11,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func (s *collectorState) initReliability() error {
-	if s.cfg.reliabilityMode != "spool" {
+	if s.cfg.reliabilityMode != "spool" && s.cfg.reliabilityMode != "hybrid" {
 		return nil
 	}
 	s.reliabilityCtx, s.reliabilityCancel = context.WithCancel(context.Background())
@@ -31,6 +32,7 @@ func (s *collectorState) initReliability() error {
 
 	posFilePath := spoolPath + ".pos"
 	s.spoolPosFile = posFilePath
+	s.spoolBadFile = spoolPath + ".bad.ndjson"
 
 	if err := s.loadSpoolPosition(); err != nil {
 		logJSON("warn", "spool_position_load_failed", map[string]any{"error": err.Error()})
@@ -151,7 +153,15 @@ func (s *collectorState) appendSpool(raw []byte) error {
 		return err
 	}
 
-	n, err := s.spoolFile.Write(append(append([]byte(nil), raw...), '\n'))
+	record := append([]byte(nil), raw...)
+	if encryptionEnabled(s.cfg.storageEncryptionKey) {
+		var encErr error
+		record, encErr = encryptBlob(record, s.cfg.storageEncryptionKey)
+		if encErr != nil {
+			return encErr
+		}
+	}
+	n, err := s.spoolFile.Write(append(record, '\n'))
 	if err != nil {
 		return err
 	}
@@ -168,8 +178,20 @@ func (s *collectorState) appendSpool(raw []byte) error {
 
 func (s *collectorState) enqueueDelivery(raw []byte) {
 	cp := append([]byte(nil), raw...)
+	if s.memoryLimiterEnabled() && s.cfg.maxQueueBytes > 0 && s.metrics.queueBytes.Load()+int64(len(cp)) > s.cfg.maxQueueBytes {
+		s.metrics.requestsThrottled.Add(1)
+		s.metrics.sinkWriteErrors.Add(1)
+		logJSON("warn", "delivery_queue_bytes_exceeded", map[string]any{
+			"event_bytes": len(cp),
+			"queue_bytes": s.metrics.queueBytes.Load(),
+			"max_bytes":   s.cfg.maxQueueBytes,
+		})
+		s.maybeWriteDLQ(raw, errors.New("delivery queue bytes exceeded"))
+		return
+	}
 	select {
 	case s.deliveryQueue <- cp:
+		s.metrics.queueBytes.Add(int64(len(cp)))
 	default:
 		s.metrics.sinkWriteErrors.Add(1)
 		logJSON("warn", "delivery_queue_full_dropping_event", nil)
@@ -183,10 +205,16 @@ func (s *collectorState) deliveryWorker() {
 	defer s.deliveryWG.Done()
 	for raw := range s.deliveryQueue {
 		s.processSpoolEvent(raw)
+		s.metrics.queueBytes.Add(-int64(len(raw)))
 	}
 }
 
 func (s *collectorState) processSpoolEvent(raw []byte) {
+	if encryptionEnabled(s.cfg.storageEncryptionKey) {
+		if plain, err := decryptBlob(raw, s.cfg.storageEncryptionKey); err == nil {
+			raw = plain
+		}
+	}
 	if err := s.ensureProcessor(); err != nil {
 		s.metrics.sinkWriteErrors.Add(1)
 		s.sinkHealthy.Store(false)
@@ -218,7 +246,10 @@ func (s *collectorState) processSpoolEvent(raw []byte) {
 
 func (s *collectorState) maybeWriteDLQ(raw []byte, err error) {
 	if s.processor == nil {
-		return
+		if initErr := s.ensureProcessor(); initErr != nil {
+			logJSON("error", "collector_dlq_processor_not_initialized", map[string]any{"error": initErr.Error()})
+			return
+		}
 	}
 	s.processor.WriteDLQ(raw, err)
 }
@@ -304,16 +335,32 @@ func (s *collectorState) replaySpool() error {
 	}
 
 	replayCount := int64(0)
+	skippedBytes := int64(0)
+	skippedCount := int64(0)
 	sc := bufio.NewScanner(s.spoolFile)
 	buf := make([]byte, 0, 1024*1024)
 	sc.Buffer(buf, math.MaxInt32)
 
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 || !json.Valid(line) {
+		if len(line) == 0 {
+			skippedBytes += int64(len(sc.Bytes()) + 1)
+			skippedCount++
 			continue
 		}
-		s.enqueueDelivery(line)
+		decoded := append([]byte(nil), line...)
+		if encryptionEnabled(s.cfg.storageEncryptionKey) {
+			if plain, err := decryptBlob(decoded, s.cfg.storageEncryptionKey); err == nil {
+				decoded = plain
+			}
+		}
+		if !json.Valid(decoded) {
+			s.quarantineBadSpoolLine(decoded)
+			skippedBytes += int64(len(sc.Bytes()) + 1)
+			skippedCount++
+			continue
+		}
+		s.enqueueDelivery(decoded)
 		replayCount++
 	}
 
@@ -321,12 +368,82 @@ func (s *collectorState) replaySpool() error {
 
 	logJSON("info", "spool_replay_completed", map[string]any{
 		"replayed":    replayCount,
+		"skipped":     skippedCount,
 		"from_pos":    s.spoolProcessedPos,
 		"total_count": s.metrics.spoolReplayCount,
 	})
+	if skippedBytes > 0 {
+		s.markSpoolSkipped(skippedBytes)
+	}
 
 	_, _ = s.spoolFile.Seek(0, io.SeekEnd)
 	return nil
+}
+
+func (s *collectorState) markSpoolSkipped(skippedBytes int64) {
+	if skippedBytes <= 0 {
+		return
+	}
+	s.spoolMu.Lock()
+	defer s.spoolMu.Unlock()
+
+	if s.spoolFile == nil {
+		return
+	}
+
+	currentSize, err := s.spoolFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		logJSON("error", "spool_skip_seek_failed", map[string]any{"error": err.Error()})
+		return
+	}
+
+	s.spoolProcessedPos += skippedBytes
+	if s.spoolProcessedPos < currentSize {
+		s.metrics.spoolBytes.Store(currentSize - s.spoolProcessedPos)
+		if err := s.saveSpoolPosition(); err != nil {
+			logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
+		}
+		return
+	}
+
+	if err := s.spoolFile.Truncate(0); err != nil {
+		logJSON("error", "spool_truncate_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	if _, err := s.spoolFile.Seek(0, io.SeekStart); err != nil {
+		logJSON("error", "spool_rewind_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	s.spoolProcessedPos = 0
+	s.metrics.spoolBytes.Store(0)
+	if err := s.saveSpoolPosition(); err != nil {
+		logJSON("error", "spool_position_save_failed", map[string]any{"error": err.Error()})
+	}
+}
+
+func (s *collectorState) quarantineBadSpoolLine(raw []byte) {
+	if s.spoolBadFile == "" || len(bytes.TrimSpace(raw)) == 0 {
+		return
+	}
+	entry := map[string]any{
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"reason":    "invalid_spool_record",
+		"raw":       string(raw),
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		logJSON("error", "spool_quarantine_encode_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	f, err := os.OpenFile(s.spoolBadFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		logJSON("error", "spool_quarantine_open_failed", map[string]any{"error": err.Error()})
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		logJSON("error", "spool_quarantine_write_failed", map[string]any{"error": err.Error()})
+	}
 }
 
 type spoolDeliveryResult struct {

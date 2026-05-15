@@ -23,6 +23,7 @@ type workerFileConfig = collectorconfig.Config
 
 type workerConfig struct {
 	shutdownTimeout         time.Duration
+	storageEncryptionKey    string
 	duckDBPath              string
 	duckDBDriver            string
 	duckDBTable             string
@@ -61,6 +62,10 @@ type workerConfig struct {
 	dedupeKey               string
 	dedupeWindow            time.Duration
 	dedupeBackend           string
+	dedupeRedisAddr         string
+	dedupeRedisPassword     string
+	dedupeRedisDB           int
+	dedupeRedisPrefix       string
 }
 
 func loadWorkerConfigFromArgs(args []string) (workerConfig, error) {
@@ -79,6 +84,9 @@ func loadWorkerConfigFromArgs(args []string) (workerConfig, error) {
 	}
 	if err := applyWorkerEnvOverrides(&fc); err != nil {
 		return workerConfig{}, err
+	}
+	if fc.Storage.EncryptionKey == "" && strings.TrimSpace(fc.Storage.EncryptionKeyEnv) != "" {
+		fc.Storage.EncryptionKey = os.Getenv(fc.Storage.EncryptionKeyEnv)
 	}
 	if err := validateWorkerConfig(fc); err != nil {
 		return workerConfig{}, err
@@ -153,6 +161,8 @@ func applyWorkerEnvOverrides(fc *workerFileConfig) error {
 	setString("DUCKDB_PATH", &fc.DuckDB.Path)
 	setCSV("COLLECTOR_KAFKA_BROKERS", &fc.Kafka.Brokers)
 	setString("COLLECTOR_KAFKA_TOPIC", &fc.Kafka.Topic)
+	setString("COLLECTOR_DEDUPE_REDIS_ADDR", &fc.Dedupe.RedisAddr)
+	setString("COLLECTOR_DEDUPE_REDIS_PASSWORD", &fc.Dedupe.RedisPassword)
 	setString("LOXA_WORKER_CONSUMER_GROUP", &fc.Worker.ConsumerGroup)
 	if err := setDuration("LOXA_WORKER_POLL_TIMEOUT", &fc.Worker.PollTimeout); err != nil {
 		return err
@@ -201,8 +211,16 @@ func validateWorkerConfig(fc workerFileConfig) error {
 	if fc.DeadLetter.Enabled && strings.TrimSpace(fc.DeadLetter.Path) == "" {
 		return errors.New("dead_letter.path must not be empty when dead_letter.enabled is true")
 	}
-	if fc.Dedupe.Enabled && strings.ToLower(strings.TrimSpace(fc.Dedupe.Backend)) != "memory" {
-		return errors.New("dedupe.backend must currently be memory")
+	if fc.Dedupe.Enabled {
+		switch strings.ToLower(strings.TrimSpace(fc.Dedupe.Backend)) {
+		case "", "memory":
+		case "redis":
+			if strings.TrimSpace(fc.Dedupe.RedisAddr) == "" {
+				return errors.New("dedupe.redis_addr must be configured when dedupe.backend is redis")
+			}
+		default:
+			return errors.New("dedupe.backend must be memory or redis")
+		}
 	}
 	return nil
 }
@@ -210,6 +228,7 @@ func validateWorkerConfig(fc workerFileConfig) error {
 func workerRuntimeConfig(fc workerFileConfig) workerConfig {
 	return workerConfig{
 		shutdownTimeout:         fc.Collector.ShutdownTimeout,
+		storageEncryptionKey:    fc.Storage.EncryptionKey,
 		duckDBPath:              fc.DuckDB.Path,
 		duckDBDriver:            fc.DuckDB.Driver,
 		duckDBTable:             fc.DuckDB.Table,
@@ -248,6 +267,10 @@ func workerRuntimeConfig(fc workerFileConfig) workerConfig {
 		dedupeKey:               fc.Dedupe.Key,
 		dedupeWindow:            fc.Dedupe.Window,
 		dedupeBackend:           strings.ToLower(fc.Dedupe.Backend),
+		dedupeRedisAddr:         strings.TrimSpace(fc.Dedupe.RedisAddr),
+		dedupeRedisPassword:     fc.Dedupe.RedisPassword,
+		dedupeRedisDB:           fc.Dedupe.RedisDB,
+		dedupeRedisPrefix:       strings.TrimSpace(fc.Dedupe.RedisPrefix),
 	}
 }
 

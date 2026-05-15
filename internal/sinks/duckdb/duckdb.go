@@ -12,6 +12,7 @@ import (
 	"time"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
+	"github.com/astraive/loxa-collector/internal/sinks/internal/atrest"
 	"github.com/astraive/loxa-collector/internal/sinks/internal/projection"
 	"github.com/marcboeker/go-duckdb"
 )
@@ -46,6 +47,8 @@ type Config struct {
 	// UseAppender enables DuckDB's Appender API for high-performance ingest.
 	// Only effective when WriterLoop is enabled.
 	UseAppender bool
+	EncryptRaw  bool
+	EncryptKey  string
 }
 
 type sink struct {
@@ -65,6 +68,8 @@ type sink struct {
 
 	writerLoop  bool
 	useAppender bool
+	encryptRaw  bool
+	encryptKey  string
 	writerStmt  *sql.Stmt
 
 	mu      sync.Mutex
@@ -158,6 +163,8 @@ func New(cfg Config) (collectorevent.Sink, error) {
 		stopCh:      make(chan struct{}),
 		writerLoop:  cfg.WriterLoop,
 		useAppender: cfg.UseAppender,
+		encryptRaw:  cfg.EncryptRaw,
+		encryptKey:  cfg.EncryptKey,
 	}
 	if s.batchSize <= 0 {
 		s.batchSize = 1
@@ -526,6 +533,13 @@ func (s *sink) writerWorkerAppender() {
 
 func (s *sink) buildArgs(encoded []byte) ([]any, error) {
 	if len(s.columns) == 0 {
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return nil, err
+			}
+			return []any{enc}, nil
+		}
 		return []any{string(encoded)}, nil
 	}
 
@@ -536,7 +550,15 @@ func (s *sink) buildArgs(encoded []byte) ([]any, error) {
 	args := make([]any, 0, len(values)+1)
 	args = append(args, values...)
 	if s.storeRaw {
-		args = append(args, string(encoded))
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, enc)
+		} else {
+			args = append(args, string(encoded))
+		}
 	}
 	return args, nil
 }

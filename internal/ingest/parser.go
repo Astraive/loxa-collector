@@ -10,6 +10,8 @@ import (
 	"math"
 	"net/http"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 type RequestEnvelope struct {
@@ -26,13 +28,22 @@ func ParseEvents(r *http.Request, maxBodyBytes int64) ([][]byte, error) {
 	defer r.Body.Close()
 
 	reader := io.Reader(r.Body)
-	if strings.Contains(strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))), "gzip") {
+	encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch {
+	case strings.Contains(encoding, "gzip"):
 		gz, err := gzip.NewReader(r.Body)
 		if err != nil {
 			return nil, err
 		}
 		defer gz.Close()
 		reader = gz
+	case strings.Contains(encoding, "zstd"):
+		decoder, err := zstd.NewReader(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer decoder.Close()
+		reader = decoder
 	}
 
 	payload, err := io.ReadAll(io.LimitReader(reader, maxBodyBytes+1))
@@ -59,12 +70,6 @@ func ParseEvents(r *http.Request, maxBodyBytes int64) ([][]byte, error) {
 		}
 		return out, nil
 	case '{':
-		if bytes.Contains(payload, []byte{'\n'}) {
-			ndjson := ParseNDJSON(payload)
-			if len(ndjson) > 1 {
-				return ndjson, nil
-			}
-		}
 		var envelope RequestEnvelope
 		if err := json.Unmarshal(payload, &envelope); err == nil && len(envelope.Events) > 0 {
 			out := make([][]byte, 0, len(envelope.Events))
@@ -73,7 +78,18 @@ func ParseEvents(r *http.Request, maxBodyBytes int64) ([][]byte, error) {
 			}
 			return out, nil
 		}
-		return [][]byte{payload}, nil
+		var single json.RawMessage
+		if err := json.Unmarshal(payload, &single); err == nil {
+			return [][]byte{payload}, nil
+		}
+		// If object parsing failed, fall back to NDJSON handling.
+		if bytes.Contains(payload, []byte{'\n'}) {
+			ndjson := ParseNDJSON(payload)
+			if len(ndjson) > 1 {
+				return ndjson, nil
+			}
+		}
+		return nil, fmt.Errorf("invalid JSON object payload")
 	default:
 		return ParseNDJSON(payload), nil
 	}

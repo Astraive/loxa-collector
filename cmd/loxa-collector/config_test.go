@@ -143,6 +143,12 @@ func TestValidateFileConfigRejectsInvalidValues(t *testing.T) {
 	if err := validateFileConfig(cfg); err == nil {
 		t.Fatalf("expected export format validation error")
 	}
+
+	cfg = defaultFileConfig()
+	cfg.Components.Processors = append(cfg.Components.Processors, "whoops")
+	if err := validateFileConfig(cfg); err == nil || !strings.Contains(err.Error(), "unknown component") {
+		t.Fatalf("expected unknown component validation error, got: %v", err)
+	}
 }
 
 func TestConfigCommandPrint(t *testing.T) {
@@ -303,6 +309,26 @@ func TestValidateFileConfigFanoutOutputValidation(t *testing.T) {
 	cfg.Fanout.Delivery.Fallback.Enabled = true
 	if err := validateFileConfig(cfg); err != nil {
 		t.Fatalf("expected valid fanout config, got: %v", err)
+	}
+}
+
+func TestValidateFileConfigPostgresFanoutOutputValidation(t *testing.T) {
+	cfg := defaultFileConfig()
+	cfg.Fanout.Outputs = []collectorconfig.FanoutOutputConfig{
+		{
+			Name:    "pg-copy",
+			Role:    "secondary",
+			Type:    "postgres",
+			Enabled: true,
+			Postgres: collectorconfig.FanoutPostgresConfig{
+				DSN:       "postgres://user:pass@localhost:5432/loxa?sslmode=disable",
+				Table:     "events_copy",
+				RawColumn: "raw_payload",
+			},
+		},
+	}
+	if err := validateFileConfig(cfg); err != nil {
+		t.Fatalf("expected valid postgres fanout config, got: %v", err)
 	}
 }
 

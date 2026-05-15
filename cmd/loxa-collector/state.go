@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/rand"
 	"strings"
 	"time"
@@ -62,18 +63,27 @@ func (s *collectorState) ensureProcessor() error {
 		DLQOnSecondaryFail:      s.cfg.dlqOnSecondaryFail,
 		DLQOnFallbackFail:       s.cfg.dlqOnFallbackFail,
 		DLQOnPolicyFail:         s.cfg.dlqOnPolicyFail,
-		DedupeEnabled:           s.cfg.dedupeEnabled,
+		DedupeEnabled:           s.dedupeEnabled(),
 		DedupeKey:               s.cfg.dedupeKey,
 		DedupeWindow:            s.cfg.dedupeWindow,
 		OnDiskFull: func() {
 			s.diskHealthy.Store(false)
 		},
 		Schema: processing.SchemaConfig{
-			Mode:           s.cfg.schemaMode,
+			Mode:           schemaModeForProcessor(s),
 			SchemaVersion:  s.cfg.schemaSchemaVersion,
 			EventVersion:   s.cfg.schemaEventVersion,
 			QuarantinePath: s.cfg.schemaQuarantinePath,
 			Registry:       s.convertSchemaRegistry(),
+		},
+		Privacy: processing.PrivacyConfig{
+			Mode:       s.cfg.privacyMode,
+			Blocklist:  append([]string(nil), s.cfg.privacyBlocklist...),
+			Allowlist:  append([]string(nil), s.cfg.privacyAllowlist...),
+			SecretScan: s.cfg.secretScan,
+		},
+		LogFunc: func(level string, message string, fields map[string]any) {
+			logJSON(level, message, fields)
 		},
 	}, s.ingestSink, s.secondarySinks, s.fallbackSink, s.rng)
 	if err != nil {
@@ -81,6 +91,13 @@ func (s *collectorState) ensureProcessor() error {
 	}
 	s.processor = processor
 	return nil
+}
+
+func schemaModeForProcessor(s *collectorState) string {
+	if !s.schemaValidationEnabled() {
+		return "off"
+	}
+	return s.cfg.schemaMode
 }
 
 func (s *collectorState) convertSchemaRegistry() []processing.SchemaRegistryEntry {
@@ -101,6 +118,12 @@ func (s *collectorState) convertSchemaRegistry() []processing.SchemaRegistryEntr
 func (s *collectorState) isDuplicate(value string) bool {
 	if strings.TrimSpace(value) == "" {
 		return false
+	}
+	if s.dedupeStore != nil {
+		seen, err := s.dedupeStore.SeenBefore(context.Background(), value, s.cfg.dedupeWindow)
+		if err == nil {
+			return seen
+		}
 	}
 	s.dedupeMu.Lock()
 	defer s.dedupeMu.Unlock()

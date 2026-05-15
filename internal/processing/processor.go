@@ -8,12 +8,14 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
 	"github.com/astraive/loxa-collector/internal/validation"
+	"github.com/redis/go-redis/v9"
 )
 
 var ErrInvalidEvent = errors.New("invalid event payload: expected JSON object")
@@ -38,13 +40,26 @@ type Config struct {
 	DedupeEnabled           bool
 	DedupeKey               string
 	DedupeWindow            time.Duration
+	DedupeBackend           string
+	DedupeRedisAddr         string
+	DedupeRedisPassword     string
+	DedupeRedisDB           int
+	DedupeRedisPrefix       string
 	ValidateJSONObjects     bool
 	OnDiskFull              func()
 	OnDLQWrite              func(n int64)
 	OnDLQWriteFail          func(n int64)
 	OnSchemaWarn            func(err error)
 	Schema                  SchemaConfig
+	Privacy                 PrivacyConfig
 	LogFunc                 func(level string, message string, fields map[string]any)
+}
+
+type PrivacyConfig struct {
+	Mode       string   // off, warn, enforce
+	Blocklist  []string // fields/patterns to redact
+	Allowlist  []string // fields/patterns to keep (if set, only these are safe)
+	SecretScan bool     // scan for secrets
 }
 
 type SchemaConfig struct {
@@ -128,6 +143,8 @@ type Processor struct {
 	quarantineMu   sync.Mutex
 	dedupeMu       sync.Mutex
 	dedupeSeenAt   map[string]time.Time
+	redisClient    *redis.Client
+	dedupePrefix   string
 }
 
 func New(cfg Config, primary collectorevent.Sink, secondary []NamedSink, fallback *NamedSink, rng *rand.Rand) (*Processor, error) {
@@ -145,6 +162,14 @@ func New(cfg Config, primary collectorevent.Sink, secondary []NamedSink, fallbac
 		fallbackSink:   fallback,
 		rng:            rng,
 		dedupeSeenAt:   make(map[string]time.Time),
+		dedupePrefix:   cfg.DedupeRedisPrefix,
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.DedupeBackend), "redis") && strings.TrimSpace(cfg.DedupeRedisAddr) != "" {
+		p.redisClient = redis.NewClient(&redis.Options{
+			Addr:     cfg.DedupeRedisAddr,
+			Password: cfg.DedupeRedisPassword,
+			DB:       cfg.DedupeRedisDB,
+		})
 	}
 	if cfg.DLQEnabled {
 		if strings.TrimSpace(cfg.DLQPath) == "" {
@@ -187,6 +212,11 @@ func (p *Processor) Close() error {
 			errs = append(errs, err.Error())
 		}
 	}
+	if p.redisClient != nil {
+		if err := p.redisClient.Close(); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
 	}
@@ -218,6 +248,22 @@ func (p *Processor) Process(ctx context.Context, raw []byte) Result {
 	}
 	if validated != nil {
 		raw = validated
+	}
+
+	// Apply privacy redaction
+	if p.cfg.Privacy.Mode != "" && strings.ToLower(p.cfg.Privacy.Mode) != "off" {
+		redacted, redactErr := p.redactPII(raw)
+		if redactErr != nil {
+			if strings.ToLower(p.cfg.Privacy.Mode) == "enforce" {
+				return Result{Invalid: true, Err: fmt.Errorf("privacy redaction failed: %w", redactErr)}
+			}
+			// warn mode: log and continue
+			if p.cfg.LogFunc != nil {
+				p.cfg.LogFunc("warn", "privacy_redaction_failed", map[string]any{"error": redactErr.Error()})
+			}
+		} else {
+			raw = redacted
+		}
 	}
 
 	if p.cfg.DedupeEnabled {
@@ -538,6 +584,16 @@ func (p *Processor) isDuplicate(value string) bool {
 	if strings.TrimSpace(value) == "" {
 		return false
 	}
+	if p.redisClient != nil {
+		key := value
+		if strings.TrimSpace(p.dedupePrefix) != "" {
+			key = p.dedupePrefix + value
+		}
+		ok, err := p.redisClient.SetNX(context.Background(), key, "1", p.cfg.DedupeWindow).Result()
+		if err == nil {
+			return !ok
+		}
+	}
 	p.dedupeMu.Lock()
 	defer p.dedupeMu.Unlock()
 	now := time.Now()
@@ -572,4 +628,125 @@ func isDiskFullErr(err error) bool {
 	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "no space left") || strings.Contains(s, "disk full")
+}
+
+// redactPII applies privacy redaction to a JSON event
+func (p *Processor) redactPII(raw []byte) ([]byte, error) {
+	if p.cfg.Privacy.Mode == "" || strings.ToLower(p.cfg.Privacy.Mode) == "off" {
+		return raw, nil
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return raw, err
+	}
+
+	redacted := p.redactMap(data, "")
+	result, err := json.Marshal(redacted)
+	if err != nil {
+		return raw, err
+	}
+
+	return result, nil
+}
+
+// redactMap recursively redacts sensitive fields in a map
+func (p *Processor) redactMap(data map[string]interface{}, prefix string) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	for key, value := range data {
+		fieldPath := key
+		if prefix != "" {
+			fieldPath = prefix + "." + key
+		}
+
+		if p.shouldRedactField(fieldPath, key) {
+			result[key] = "[REDACTED]"
+			if p.cfg.LogFunc != nil {
+				p.cfg.LogFunc("info", "pii_redacted", map[string]any{"field": fieldPath})
+			}
+		} else if nested, ok := value.(map[string]interface{}); ok {
+			result[key] = p.redactMap(nested, fieldPath)
+		} else if arr, ok := value.([]interface{}); ok {
+			result[key] = p.redactArray(arr, fieldPath)
+		} else {
+			result[key] = value
+		}
+	}
+
+	return result
+}
+
+// redactArray recursively redacts sensitive fields in an array
+func (p *Processor) redactArray(arr []interface{}, prefix string) []interface{} {
+	result := make([]interface{}, len(arr))
+
+	for i, item := range arr {
+		if nested, ok := item.(map[string]interface{}); ok {
+			result[i] = p.redactMap(nested, prefix)
+		} else if nestedArr, ok := item.([]interface{}); ok {
+			result[i] = p.redactArray(nestedArr, prefix)
+		} else {
+			result[i] = item
+		}
+	}
+
+	return result
+}
+
+// shouldRedactField determines if a field should be redacted
+func (p *Processor) shouldRedactField(fieldPath, key string) bool {
+	keyLower := strings.ToLower(key)
+
+	// If allowlist is specified, redact everything NOT in allowlist
+	if len(p.cfg.Privacy.Allowlist) > 0 {
+		allowed := false
+		for _, pattern := range p.cfg.Privacy.Allowlist {
+			if p.matchesPattern(fieldPath, keyLower, pattern) {
+				allowed = true
+				break
+			}
+		}
+		return !allowed // Redact if NOT in allowlist
+	}
+
+	// Check blocklist
+	for _, pattern := range p.cfg.Privacy.Blocklist {
+		if p.matchesPattern(fieldPath, keyLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesPattern checks if a field matches a redaction pattern
+func (p *Processor) matchesPattern(fieldPath, keyLower, pattern string) bool {
+	patternLower := strings.ToLower(pattern)
+
+	// Exact match on key
+	if keyLower == patternLower {
+		return true
+	}
+
+	// Match on full path
+	if fieldPath == pattern || strings.ToLower(fieldPath) == patternLower {
+		return true
+	}
+
+	// Match last segment of path (e.g., "email" matches "user.email")
+	parts := strings.Split(fieldPath, ".")
+	if len(parts) > 0 && strings.ToLower(parts[len(parts)-1]) == patternLower {
+		return true
+	}
+
+	// Wildcard match (e.g., "user.*" matches "user.email")
+	if strings.Contains(patternLower, "*") {
+		wildcardRegex := strings.ReplaceAll(patternLower, "*", ".*")
+		if match := regexp.MustCompile("^" + wildcardRegex + "$").MatchString(fieldPath); match {
+			return true
+		}
+	}
+
+	return false
 }

@@ -171,6 +171,8 @@ func runWorker(cfg workerConfig) error {
 		FlushInterval:   cfg.duckDBFlushInterval,
 		WriterLoop:      cfg.duckDBWriterLoop,
 		WriterQueueSize: cfg.duckDBWriterQueueSize,
+		EncryptRaw:      true,
+		EncryptKey:      cfg.storageEncryptionKey,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create duckdb sink: %w", err)
@@ -206,6 +208,11 @@ func runWorker(cfg workerConfig) error {
 		DedupeEnabled:           cfg.dedupeEnabled,
 		DedupeKey:               cfg.dedupeKey,
 		DedupeWindow:            cfg.dedupeWindow,
+		DedupeBackend:           cfg.dedupeBackend,
+		DedupeRedisAddr:         cfg.dedupeRedisAddr,
+		DedupeRedisPassword:     cfg.dedupeRedisPassword,
+		DedupeRedisDB:           cfg.dedupeRedisDB,
+		DedupeRedisPrefix:       cfg.dedupeRedisPrefix,
 		ValidateJSONObjects:     true,
 	}, primarySink, secondarySinks, fallbackSink, nil)
 	if err != nil {

@@ -25,6 +25,10 @@ func (s *collectorState) metricsHandler() http.Handler {
 				Help: "Total ingest requests rejected by rate limiting.",
 			}, func() float64 { return float64(s.metrics.requestsLimited.Load()) }),
 			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Name: collectormetrics.RequestsThrottledName,
+				Help: "Total ingest requests rejected by collector backpressure limits.",
+			}, func() float64 { return float64(s.metrics.requestsThrottled.Load()) }),
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
 				Name: collectormetrics.EventsAcceptedName,
 				Help: "Total events accepted by collector.",
 			}, func() float64 { return float64(s.metrics.eventsAccepted.Load()) }),
@@ -48,6 +52,18 @@ func (s *collectorState) metricsHandler() http.Handler {
 				Name: collectormetrics.SpoolBytesName,
 				Help: "Current spool file size in bytes.",
 			}, func() float64 { return float64(s.metrics.spoolBytes.Load()) }),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: collectormetrics.QueueBytesName,
+				Help: "Current in-memory delivery queue bytes.",
+			}, func() float64 { return float64(s.metrics.queueBytes.Load()) }),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: collectormetrics.InflightRequestsName,
+				Help: "Current ingest requests being processed.",
+			}, func() float64 { return float64(s.metrics.inflightRequests.Load()) }),
+			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: collectormetrics.InflightEventsName,
+				Help: "Current ingest events being processed.",
+			}, func() float64 { return float64(s.metrics.inflightEvents.Load()) }),
 			prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: collectormetrics.SinkHealthName,
 				Help: "Collector sink health state (1=healthy,0=unhealthy).",

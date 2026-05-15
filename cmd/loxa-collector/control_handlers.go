@@ -25,7 +25,11 @@ func (s *collectorState) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *collectorState) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *collectorState) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":           statusString(s.isReady()),
 		"version":          collectorVersion,
@@ -41,6 +45,11 @@ func (s *collectorState) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"mode":        s.cfg.reliabilityMode,
 			"depth":       deliveryQueueDepth(s.deliveryQueue),
 			"spool_bytes": s.metrics.spoolBytes.Load(),
+			"queue_bytes": s.metrics.queueBytes.Load(),
+		},
+		"inflight": map[string]any{
+			"requests": s.metrics.inflightRequests.Load(),
+			"events":   s.metrics.inflightEvents.Load(),
 		},
 		"limits": map[string]any{
 			"max_event_bytes":       s.cfg.maxEventBytes,
@@ -54,7 +63,11 @@ func (s *collectorState) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *collectorState) handleSinks(w http.ResponseWriter, _ *http.Request) {
+func (s *collectorState) handleSinks(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	sinks := s.sinksForShutdown()
 	out := make([]map[string]any, 0, len(sinks))
 	for _, sink := range sinks {
@@ -67,6 +80,10 @@ func (s *collectorState) handleSinks(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *collectorState) handleSink(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	name := r.PathValue("name")
 	for _, sink := range s.sinksForShutdown() {
 		if sink.Name == name {
@@ -103,6 +120,10 @@ type queryRequest struct {
 }
 
 func (s *collectorState) handleQuery(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	var req queryRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_query_request", "message": err.Error()})
@@ -120,12 +141,20 @@ func (s *collectorState) handleQuery(w http.ResponseWriter, r *http.Request) {
 		req.Limit = 1000
 	}
 
-	db, err := sql.Open(s.cfg.duckDBDriver, s.cfg.duckDBPath)
-	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "query_db_open_failed", "message": err.Error()})
-		return
+	db := s.queryDB
+	var closeDB func()
+	if db == nil {
+		var err error
+		db, err = sql.Open(s.cfg.duckDBDriver, s.cfg.duckDBPath)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "query_db_open_failed", "message": err.Error()})
+			return
+		}
+		closeDB = func() { _ = db.Close() }
 	}
-	defer db.Close()
+	if closeDB != nil {
+		defer closeDB()
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -173,7 +202,11 @@ func (s *collectorState) handleQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"columns": columns, "rows": result, "row_count": len(result)})
 }
 
-func (s *collectorState) handleDLQList(w http.ResponseWriter, _ *http.Request) {
+func (s *collectorState) handleDLQList(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	events, err := s.readDLQRecords()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"events": []any{}, "error": err.Error()})
@@ -183,6 +216,10 @@ func (s *collectorState) handleDLQList(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *collectorState) handleDLQShow(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	id := r.PathValue("id")
 	events, err := s.readDLQRecords()
 	if err != nil {
@@ -199,6 +236,10 @@ func (s *collectorState) handleDLQShow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *collectorState) handleDLQReplay(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	id := r.PathValue("id")
 	events, err := s.readDLQRecords()
 	if err != nil {
@@ -224,6 +265,10 @@ func (s *collectorState) handleDLQReplay(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *collectorState) handleDLQReplayAll(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	events, err := s.readDLQRecords()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"accepted": 0, "replayed": 0, "error": err.Error()})
@@ -248,6 +293,10 @@ func (s *collectorState) handleDLQReplayAll(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *collectorState) handleDLQDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
 	id := r.PathValue("id")
 	events, err := s.readDLQRecords()
 	if err != nil {

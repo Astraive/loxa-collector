@@ -11,6 +11,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
 	collectorevent "github.com/astraive/loxa-collector/internal/event"
+	"github.com/astraive/loxa-collector/internal/sinks/internal/atrest"
 	"github.com/astraive/loxa-collector/internal/sinks/internal/projection"
 )
 
@@ -27,7 +28,9 @@ type Config struct {
 	// RawColumn is used for raw mode and optional raw storage in schema mode.
 	RawColumn string
 	// TLSConfig enables TLS for the ClickHouse connection when provided.
-	TLSConfig *tls.Config
+	TLSConfig  *tls.Config
+	EncryptRaw bool
+	EncryptKey string
 }
 
 type sink struct {
@@ -39,6 +42,8 @@ type sink struct {
 	rawQuery    string
 	schemaQuery string
 	storeRaw    bool
+	encryptRaw  bool
+	encryptKey  string
 }
 
 var tableIdentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -118,6 +123,8 @@ func New(cfg Config) (collectorevent.Sink, error) {
 		rawQuery:    fmt.Sprintf("INSERT INTO %s (%s) VALUES (?)", quotedTable, quotedRaw),
 		schemaQuery: schemaQuery,
 		storeRaw:    storeRaw,
+		encryptRaw:  cfg.EncryptRaw,
+		encryptKey:  cfg.EncryptKey,
 	}, nil
 }
 
@@ -125,7 +132,15 @@ func (s *sink) Name() string { return "clickhouse" }
 
 func (s *sink) WriteEvent(ctx context.Context, encoded []byte, _ *collectorevent.Event) error {
 	if len(s.columns) == 0 {
-		return s.conn.Exec(ctx, s.rawQuery, string(encoded))
+		value := string(encoded)
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return err
+			}
+			value = enc
+		}
+		return s.conn.Exec(ctx, s.rawQuery, value)
 	}
 
 	values, err := projection.ProjectValues(encoded, s.schema, s.columns)
@@ -135,7 +150,15 @@ func (s *sink) WriteEvent(ctx context.Context, encoded []byte, _ *collectorevent
 	args := make([]any, 0, len(values)+1)
 	args = append(args, values...)
 	if s.storeRaw {
-		args = append(args, string(encoded))
+		if s.encryptRaw {
+			enc, err := atrest.EncryptString(encoded, s.encryptKey)
+			if err != nil {
+				return err
+			}
+			args = append(args, enc)
+		} else {
+			args = append(args, string(encoded))
+		}
 	}
 	return s.conn.Exec(ctx, s.schemaQuery, args...)
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/astraive/loxa-collector/internal/sinks/gcs"
 	"github.com/astraive/loxa-collector/internal/sinks/loki"
 	"github.com/astraive/loxa-collector/internal/sinks/otlp"
+	"github.com/astraive/loxa-collector/internal/sinks/postgres"
 	"github.com/astraive/loxa-collector/internal/sinks/s3"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -32,6 +33,7 @@ const (
 	fanoutSinkLoki               = "loki"
 	fanoutSinkOTLP               = "otlp"
 	fanoutSinkClickHouse         = "clickhouse"
+	fanoutSinkPostgres           = "postgres"
 	fanoutSinkS3                 = "s3"
 	fanoutSinkGCS                = "gcs"
 )
@@ -64,6 +66,11 @@ type collectorFanoutOutput struct {
 	chSchema        map[string]string
 	chStoreRaw      bool
 	chRawColumn     string
+	pgDSN           string
+	pgTable         string
+	pgSchema        map[string]string
+	pgStoreRaw      bool
+	pgRawColumn     string
 	s3Bucket        string
 	s3Prefix        string
 	s3Region        string
@@ -112,11 +119,13 @@ func createFanoutSinks(cfg collectorConfig) ([]namedSink, *namedSink, []*sql.DB,
 		case fanoutSinkOTLP:
 			sink, err = newOTLPFanoutSink(output)
 		case fanoutSinkClickHouse:
-			sink, err = newClickHouseFanoutSink(output)
+			sink, err = newClickHouseFanoutSink(cfg, output)
+		case fanoutSinkPostgres:
+			sink, err = newPostgresFanoutSink(cfg, output)
 		case fanoutSinkS3:
-			sink, err = newS3FanoutSink(output)
+			sink, err = newS3FanoutSink(cfg, output)
 		case fanoutSinkGCS:
-			sink, err = newGCSFanoutSink(output)
+			sink, err = newGCSFanoutSink(cfg, output)
 		default:
 			for _, fanoutDB := range dbs {
 				_ = fanoutDB.Close()
@@ -190,6 +199,8 @@ func newDuckDBFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (col
 		FlushInterval:   cfg.duckDBFlushInterval,
 		WriterLoop:      cfg.duckDBWriterLoop,
 		WriterQueueSize: cfg.duckDBWriterQueueSize,
+		EncryptRaw:      true,
+		EncryptKey:      cfg.storageEncryptionKey,
 	})
 	if err != nil {
 		_ = db.Close()
@@ -225,23 +236,40 @@ func newOTLPFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error
 	})
 }
 
-func newClickHouseFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
+func newClickHouseFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if len(output.chAddrs) == 0 {
 		return nil, fmt.Errorf("fanout output %q: clickhouse.addrs must not be empty", output.name)
 	}
 	return clickhouse.New(clickhouse.Config{
-		Addrs:     output.chAddrs,
-		Database:  output.chDatabase,
-		Username:  output.chUsername,
-		Password:  output.chPassword,
-		Table:     output.chTable,
-		Schema:    output.chSchema,
-		StoreRaw:  output.chStoreRaw,
-		RawColumn: output.chRawColumn,
+		Addrs:      output.chAddrs,
+		Database:   output.chDatabase,
+		Username:   output.chUsername,
+		Password:   output.chPassword,
+		Table:      output.chTable,
+		Schema:     output.chSchema,
+		StoreRaw:   output.chStoreRaw,
+		RawColumn:  output.chRawColumn,
+		EncryptRaw: true,
+		EncryptKey: cfg.storageEncryptionKey,
 	})
 }
 
-func newS3FanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
+func newPostgresFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (collectorevent.Sink, error) {
+	if strings.TrimSpace(output.pgDSN) == "" {
+		return nil, fmt.Errorf("fanout output %q: postgres.dsn must not be empty", output.name)
+	}
+	return postgres.New(context.Background(), postgres.Config{
+		DSN:        output.pgDSN,
+		Table:      output.pgTable,
+		Schema:     output.pgSchema,
+		StoreRaw:   output.pgStoreRaw,
+		RawColumn:  output.pgRawColumn,
+		EncryptRaw: true,
+		EncryptKey: cfg.storageEncryptionKey,
+	})
+}
+
+func newS3FanoutSink(cfg collectorConfig, output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if output.s3Bucket == "" {
 		return nil, fmt.Errorf("fanout output %q: s3.bucket must not be empty", output.name)
 	}
@@ -272,10 +300,11 @@ func newS3FanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) 
 		Schema:        output.s3Schema,
 		BatchSize:     output.s3BatchSize,
 		FlushInterval: output.s3FlushIntvl,
+		EncryptKey:    cfg.storageEncryptionKey,
 	})
 }
 
-func newGCSFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error) {
+func newGCSFanoutSink(cfg collectorConfig, output collectorFanoutOutput) (collectorevent.Sink, error) {
 	if output.gcsBucket == "" {
 		return nil, fmt.Errorf("fanout output %q: gcs.bucket must not be empty", output.name)
 	}
@@ -298,6 +327,7 @@ func newGCSFanoutSink(output collectorFanoutOutput) (collectorevent.Sink, error)
 		Schema:        output.gcsSchema,
 		BatchSize:     output.gcsBatchSize,
 		FlushInterval: output.gcsFlushIntvl,
+		EncryptKey:    cfg.storageEncryptionKey,
 	})
 }
 

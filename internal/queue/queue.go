@@ -2,9 +2,15 @@ package queue
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -447,6 +453,7 @@ type DiskSinkConfig struct {
 	Path        string
 	MaxFileSize int64
 	MaxFiles    int
+	EncryptKey  string
 }
 
 type DiskSink struct {
@@ -505,6 +512,14 @@ func (s *DiskSink) WriteBatch(ctx context.Context, events [][]byte) error {
 		event := Event{
 			Timestamp: time.Now(),
 			Payload:   e,
+		}
+		if cfgKey := s.cfg.EncryptKey; cfgKey != "" {
+			encrypted, err := encryptPayload(event.Payload, cfgKey)
+			if err != nil {
+				marshalErrs = append(marshalErrs, fmt.Errorf("encrypt event payload: %w", err))
+				continue
+			}
+			event.Payload = encrypted
 		}
 		data, err := json.Marshal(event)
 		if err != nil {
@@ -579,4 +594,29 @@ func (s *DiskSink) Close(ctx context.Context) error {
 		return s.file.Close()
 	}
 	return nil
+}
+
+func encryptPayload(payload []byte, key string) ([]byte, error) {
+	if key == "" {
+		cp := make([]byte, len(payload))
+		copy(cp, payload)
+		return cp, nil
+	}
+	derived := sha256.Sum256([]byte(key))
+	block, err := aes.NewCipher(derived[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(cryptorand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	sealed := gcm.Seal(nil, nonce, payload, nil)
+	buf := append(nonce, sealed...)
+	encoded := base64.StdEncoding.EncodeToString(buf)
+	return []byte("enc:" + encoded), nil
 }

@@ -3,9 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -38,26 +38,41 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cfg.authEnabled && s.cfg.apiKey != "" {
-		providedKey := r.Header.Get(s.cfg.apiKeyHeader)
-		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(s.cfg.apiKey)) != 1 {
-			s.metrics.requestsAuthErr.Add(1)
-			s.metrics.eventsRejected.Add(1)
-			writeJSON(w, http.StatusUnauthorized, ingest.Response{
-				RequestID: requestID,
-				Status:    ingest.StatusRejected,
-				Rejected:  1,
-				Error:     "auth_failed",
-				Reason:    "auth_failed",
-				Errors: []ingest.EventError{{
-					Index:     0,
-					Code:      "auth_failed",
-					Message:   "collector authentication failed",
-					Retryable: false,
-				}},
-			})
-			return
-		}
+	if !s.isAuthorized(r) {
+		s.metrics.requestsAuthErr.Add(1)
+		s.metrics.eventsRejected.Add(1)
+		writeJSON(w, http.StatusUnauthorized, ingest.Response{
+			RequestID: requestID,
+			Status:    ingest.StatusRejected,
+			Rejected:  1,
+			Error:     "auth_failed",
+			Reason:    "auth_failed",
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      "auth_failed",
+				Message:   "collector authentication failed",
+				Retryable: false,
+			}},
+		})
+		return
+	}
+
+	if !isSupportedIngestContentType(r.Header.Get("Content-Type")) {
+		s.metrics.eventsRejected.Add(1)
+		writeJSON(w, http.StatusUnsupportedMediaType, ingest.Response{
+			RequestID: requestID,
+			Status:    ingest.StatusRejected,
+			Rejected:  1,
+			Error:     "unsupported_content_type",
+			Reason:    "unsupported_content_type",
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      "unsupported_content_type",
+				Message:   "content type must be application/json, application/x-ndjson, or application/ndjson",
+				Retryable: false,
+			}},
+		})
+		return
 	}
 
 	rawEvents, err := ingest.ParseEvents(r, s.cfg.maxBodyBytes)
@@ -120,6 +135,32 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	totalBytes := int64(0)
+	for _, raw := range rawEvents {
+		totalBytes += int64(len(raw))
+	}
+	if gerr, release := s.acquireIngestCapacity(len(rawEvents), totalBytes); gerr != nil {
+		s.metrics.requestsThrottled.Add(1)
+		s.metrics.eventsRejected.Add(int64(len(rawEvents)))
+		writeJSON(w, http.StatusTooManyRequests, ingest.Response{
+			RequestID:    requestID,
+			Status:       ingest.StatusRejected,
+			Rejected:     len(rawEvents),
+			RetryAfterMS: s.cfg.retryAfterMS(),
+			Reason:       gerr.Code,
+			Error:        gerr.Code,
+			Errors: []ingest.EventError{{
+				Index:     0,
+				Code:      gerr.Code,
+				Message:   gerr.Message,
+				Retryable: gerr.Retryable,
+			}},
+		})
+		return
+	} else {
+		defer release()
+	}
+
 	resp := ingest.Response{RequestID: requestID}
 	for i, raw := range rawEvents {
 		if !validation.IsJSONObject(raw) {
@@ -129,7 +170,7 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eventID, _ := validation.ExtractStringPath(raw, "event_id")
-		if reason, ok := validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
+		if reason, ok := s.validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
 			s.metrics.eventsInvalid.Add(1)
 			resp.AddInvalid(i, eventID, reason, reason)
 			continue
@@ -142,9 +183,9 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 			raw = prepared
 		}
 
-		if s.cfg.reliabilityMode == "spool" {
+		if s.cfg.reliabilityMode == "spool" || s.cfg.reliabilityMode == "hybrid" {
 			// For spool mode, deduplicate at ingest time to avoid unnecessary spooling
-			if s.cfg.dedupeEnabled {
+			if s.dedupeEnabled() {
 				dedupeValue, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
 				if ok && s.isDuplicate(dedupeValue) {
 					s.metrics.eventsDeduped.Add(1)
@@ -162,6 +203,13 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 				}
 				logJSON("error", "collector_spool_write_failed", map[string]any{"error": err.Error()})
 				continue
+			}
+			if s.cfg.reliabilityMode == "hybrid" && s.hybridQueueSink != nil {
+				if err := s.hybridQueueSink.WriteEvent(r.Context(), raw, nil); err != nil {
+					s.metrics.eventsRejected.Add(1)
+					resp.AddRejected(i, eventID, "hybrid_queue_failed", err.Error(), true)
+					continue
+				}
 			}
 			s.enqueueDelivery(raw)
 		} else {
@@ -225,7 +273,10 @@ func (s *collectorState) handleIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
-func validateEventContract(raw []byte, expectedSchemaVersion, expectedEventVersion string) (string, bool) {
+func (s *collectorState) validateEventContract(raw []byte, expectedSchemaVersion, expectedEventVersion string) (string, bool) {
+	if !s.schemaValidationEnabled() {
+		return "", false
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return "invalid_json", true
@@ -258,6 +309,23 @@ func (c collectorConfig) retryAfterMS() int {
 	return 1000
 }
 
+func isSupportedIngestContentType(header string) bool {
+	value := strings.TrimSpace(header)
+	if value == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(mediaType) {
+	case "application/json", "application/x-ndjson", "application/ndjson":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *collectorState) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -275,6 +343,11 @@ func (s *collectorState) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *collectorState) handleTail(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorized(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "auth_failed"})
+		return
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -317,6 +390,16 @@ func (s *collectorState) handleTail(w http.ResponseWriter, r *http.Request) {
 
 func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]byte) (int, error) {
 	accepted := 0
+	totalBytes := int64(0)
+	for _, raw := range rawEvents {
+		totalBytes += int64(len(raw))
+	}
+	if gerr, release := s.acquireIngestCapacity(len(rawEvents), totalBytes); gerr != nil {
+		s.metrics.requestsThrottled.Add(1)
+		return 0, gerr
+	} else {
+		defer release()
+	}
 
 	for _, raw := range rawEvents {
 		if len(raw) == 0 {
@@ -327,7 +410,7 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 			s.metrics.eventsInvalid.Add(1)
 			continue
 		}
-		if reason, ok := validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
+		if reason, ok := s.validateEventContract(raw, s.cfg.schemaSchemaVersion, s.cfg.schemaEventVersion); ok {
 			_ = reason
 			s.metrics.eventsInvalid.Add(1)
 			continue
@@ -339,7 +422,7 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 			raw = prepared
 		}
 
-		if s.cfg.dedupeEnabled {
+		if s.dedupeEnabled() {
 			eventID, ok := validation.ExtractStringPath(raw, s.cfg.dedupeKey)
 			if ok && s.isDuplicate(eventID) {
 				accepted++
@@ -349,13 +432,18 @@ func (s *collectorState) handleIngestBatch(ctx context.Context, rawEvents [][]by
 			}
 		}
 
-		if s.cfg.reliabilityMode == "spool" {
+		if s.cfg.reliabilityMode == "spool" || s.cfg.reliabilityMode == "hybrid" {
 			if err := s.appendSpool(raw); err != nil {
 				if isDiskFullErr(err) {
 					s.diskHealthy.Store(false)
 				}
 				logJSON("error", "collector_spool_write_failed", map[string]any{"error": err.Error()})
 				continue
+			}
+			if s.cfg.reliabilityMode == "hybrid" && s.hybridQueueSink != nil {
+				if err := s.hybridQueueSink.WriteEvent(ctx, raw, nil); err != nil {
+					return accepted, err
+				}
 			}
 			s.enqueueDelivery(raw)
 		} else {

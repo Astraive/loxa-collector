@@ -261,3 +261,86 @@ func TestP0CollectorReadinessFailsWhenSpoolOverLimit(t *testing.T) {
 		t.Fatalf("expected 503 when spool is unhealthy, got %d", ready.Code)
 	}
 }
+
+func TestSpoolQueueBytesLimitDropsToDLQ(t *testing.T) {
+	cfg := testCollectorConfig()
+	cfg.reliabilityMode = "spool"
+	cfg.spoolDir = t.TempDir()
+	cfg.maxSpoolBytes = 1024 * 1024
+	cfg.maxQueueBytes = 8
+	cfg.dlqEnabled = true
+	cfg.dlqPath = filepath.Join(t.TempDir(), "dlq.ndjson")
+
+	state := &collectorState{
+		cfg:          cfg,
+		ingestSink:   &capturedSink{},
+		rateLimiter:  rate.NewLimiter(rate.Limit(1000), 1000),
+		rng:          randSourceForTests(),
+		dedupeSeenAt: make(map[string]time.Time),
+	}
+	state.ready.Store(true)
+	state.sinkHealthy.Store(true)
+	state.spoolHealthy.Store(true)
+	state.diskHealthy.Store(true)
+	if err := state.initReliability(); err != nil {
+		t.Fatalf("init reliability: %v", err)
+	}
+	defer state.closeReliability()
+
+	state.enqueueDelivery([]byte(`{"event":"payload-too-large-for-queue-budget"}`))
+
+	rawDLQ, err := os.ReadFile(cfg.dlqPath)
+	if err != nil {
+		t.Fatalf("read dlq: %v", err)
+	}
+	if !strings.Contains(string(rawDLQ), "delivery queue bytes exceeded") {
+		t.Fatalf("expected queue bytes DLQ reason, got %s", string(rawDLQ))
+	}
+}
+
+func TestSpoolReplaySkipsInvalidLinesAndCompacts(t *testing.T) {
+	cfg := testCollectorConfig()
+	cfg.reliabilityMode = "spool"
+	cfg.spoolDir = t.TempDir()
+	cfg.maxSpoolBytes = 1024 * 1024
+	cfg.spoolFsync = true
+
+	spoolPath := filepath.Join(cfg.spoolDir, cfg.spoolFile)
+	if err := os.WriteFile(spoolPath, []byte("not-json\n{\"event_id\":\"replay-valid\",\"event\":\"ok\"}\n"), 0o600); err != nil {
+		t.Fatalf("seed spool: %v", err)
+	}
+
+	sink := &capturedSink{}
+	state := &collectorState{
+		cfg:          cfg,
+		ingestSink:   sink,
+		rateLimiter:  rate.NewLimiter(rate.Limit(1000), 1000),
+		rng:          randSourceForTests(),
+		dedupeSeenAt: make(map[string]time.Time),
+	}
+	state.ready.Store(true)
+	state.sinkHealthy.Store(true)
+	state.spoolHealthy.Store(true)
+	state.diskHealthy.Store(true)
+	if err := state.initReliability(); err != nil {
+		t.Fatalf("init reliability: %v", err)
+	}
+	defer state.closeReliability()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.Len() == 1 && state.metrics.spoolBytes.Load() == 0 {
+			quarantinePath := spoolPath + ".bad.ndjson"
+			raw, err := os.ReadFile(quarantinePath)
+			if err != nil {
+				t.Fatalf("expected quarantine file: %v", err)
+			}
+			if !strings.Contains(string(raw), "invalid_spool_record") || !strings.Contains(string(raw), "not-json") {
+				t.Fatalf("expected quarantined invalid spool line, got %s", string(raw))
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected one replayed event and compacted spool, got replayed=%d spool_bytes=%d", sink.Len(), state.metrics.spoolBytes.Load())
+}

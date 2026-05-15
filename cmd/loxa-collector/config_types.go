@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"math/rand"
 	"net/http"
 	"os"
@@ -23,6 +24,8 @@ type serverConfig struct {
 }
 
 type collectorConfig struct {
+	configFile              string
+	configArgs              []string
 	readHeaderTimeout       time.Duration
 	addr                    string
 	shutdownTimeout         time.Duration
@@ -57,6 +60,7 @@ type collectorConfig struct {
 	readyPath               string
 	metricsPath             string
 	storagePrimary          string
+	storageEncryptionKey    string
 	rateLimitRPS            float64
 	rateLimitBurst          int
 	loggingLevel            string
@@ -123,6 +127,10 @@ type collectorConfig struct {
 	dedupeKey               string
 	dedupeWindow            time.Duration
 	dedupeBackend           string
+	dedupeRedisAddr         string
+	dedupeRedisPassword     string
+	dedupeRedisDB           int
+	dedupeRedisPrefix       string
 	kafkaBrokers            []string
 	kafkaTopic              string
 	kafkaAcks               string
@@ -136,26 +144,35 @@ type collectorConfig struct {
 	schemaSchemaVersion     string
 	schemaEventVersion      string
 	schemaQuarantinePath    string
+	schemaRegistryFile      string
 	schemaRegistry          []collectorconfig.SchemaRegistryEntry
+	retentionEnabled        bool
+	retentionDays           int
+	retentionMaxSize        int64
 }
 
 type collectorMetrics struct {
-	requestsTotal    atomic.Int64
-	requestsAuthErr  atomic.Int64
-	requestsLimited  atomic.Int64
-	eventsAccepted   atomic.Int64
-	eventsInvalid    atomic.Int64
-	eventsRejected   atomic.Int64
-	eventsDeduped    atomic.Int64
-	sinkWriteErrors  atomic.Int64
-	spoolBytes       atomic.Int64
-	retryAttempts    atomic.Int64
-	spoolReplayCount int64
+	requestsTotal     atomic.Int64
+	requestsAuthErr   atomic.Int64
+	requestsLimited   atomic.Int64
+	requestsThrottled atomic.Int64
+	eventsAccepted    atomic.Int64
+	eventsInvalid     atomic.Int64
+	eventsRejected    atomic.Int64
+	eventsDeduped     atomic.Int64
+	sinkWriteErrors   atomic.Int64
+	spoolBytes        atomic.Int64
+	queueBytes        atomic.Int64
+	inflightRequests  atomic.Int64
+	inflightEvents    atomic.Int64
+	retryAttempts     atomic.Int64
+	spoolReplayCount  int64
 }
 
 type collectorState struct {
 	cfg               collectorConfig
 	ingestSink        collectorevent.Sink
+	hybridQueueSink   collectorevent.Sink
 	secondarySinks    []namedSink
 	fallbackSink      *namedSink
 	ready             atomic.Bool
@@ -167,6 +184,7 @@ type collectorState struct {
 	rng               *rand.Rand
 	spoolFile         *os.File
 	spoolPosFile      string
+	spoolBadFile      string
 	spoolProcessedPos int64
 	spoolMu           sync.Mutex
 	deliveryQueue     chan []byte
@@ -175,10 +193,12 @@ type collectorState struct {
 	metricsHTTP       http.Handler
 	dedupeMu          sync.Mutex
 	dedupeSeenAt      map[string]time.Time
+	dedupeStore       dedupeStore
 	tailMu            sync.Mutex
 	tailSubscribers   map[chan []byte]struct{}
 	processorMu       sync.Mutex
 	processor         *processing.Processor
+	queryDB           *sql.DB
 	reliabilityCtx    context.Context
 	reliabilityCancel context.CancelFunc
 	closeOnce         sync.Once
@@ -198,6 +218,10 @@ func (s *collectorState) GetMetrics() serverconfig.Metrics {
 
 func (s *collectorState) IsHealthy() bool {
 	return s.sinkHealthy.Load() && s.diskHealthy.Load()
+}
+
+func (s *collectorState) IsReady() bool {
+	return s.isReady()
 }
 
 func (s *collectorState) Ingest(ctx context.Context, events [][]byte) (int, error) {

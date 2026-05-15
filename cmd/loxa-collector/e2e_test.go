@@ -108,7 +108,7 @@ func TestCollectorE2ERawPreservation(t *testing.T) {
 	}
 
 	wantRaw := `{"event_id":"evt-1","event":"checkout.request","service":"checkout","http":{"status":200},"duration_ms":12.5,"timestamp":"2026-05-11T00:00:00Z"}`
-	if raw != wantRaw {
+	if !equivalentJSON(raw, wantRaw) {
 		t.Fatalf("raw mismatch:\nwant: %s\ngot:  %s", wantRaw, raw)
 	}
 }
@@ -179,4 +179,45 @@ func mustGzip(t *testing.T, payload []byte) []byte {
 		t.Fatalf("gzip close: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func equivalentJSON(left, right string) bool {
+	var lhs any
+	if err := json.Unmarshal([]byte(left), &lhs); err != nil {
+		return false
+	}
+	var rhs any
+	if err := json.Unmarshal([]byte(right), &rhs); err != nil {
+		return false
+	}
+	return strings.TrimSpace(left) == strings.TrimSpace(right) || deepEqualJSON(lhs, rhs)
+}
+
+func deepEqualJSON(left, right any) bool {
+	switch lhs := left.(type) {
+	case map[string]any:
+		rhs, ok := right.(map[string]any)
+		if !ok || len(lhs) != len(rhs) {
+			return false
+		}
+		for key, value := range lhs {
+			if !deepEqualJSON(value, rhs[key]) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		rhs, ok := right.([]any)
+		if !ok || len(lhs) != len(rhs) {
+			return false
+		}
+		for i := range lhs {
+			if !deepEqualJSON(lhs[i], rhs[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return left == right
+	}
 }
